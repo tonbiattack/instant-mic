@@ -257,8 +257,8 @@ func (c *conn) handleKey(data []byte) {
 		_ = c.send(protocol.Error{Type: protocol.TypeError, Code: "bad_key", Message: err.Error()})
 		return
 	}
-	key := speech.Key(msg.Key)
-	if !speech.IsKnownKey(key) {
+	seq, err := speech.ParseSequence(msg.Key)
+	if err != nil {
 		_ = c.send(protocol.Error{Type: protocol.TypeError, ID: msg.ID, Code: "bad_key", Message: "unsupported key"})
 		return
 	}
@@ -267,9 +267,13 @@ func (c *conn) handleKey(data []byte) {
 		return
 	}
 
+	count := msg.Count
+	if count < 1 {
+		count = 1
+	}
 	start := time.Now()
-	err = c.srv.inserter.PressKey(key)
-	res := AckResult{OK: err == nil, Applied: string(key)}
+	err = c.srv.inserter.PressKey(seq, count)
+	res := AckResult{OK: err == nil, Applied: seq.String()}
 	if err != nil {
 		res.Error = humanInputError(err)
 		c.srv.emit("warn", "キー操作に失敗: "+res.Error)
@@ -317,10 +321,10 @@ func (s *Server) apply(result speech.Result) AckResult {
 	case speech.KindUnknownCommand:
 		return AckResult{OK: false, Error: "未対応のコマンドです: " + result.Raw}
 	case speech.KindKey:
-		if err := s.inserter.PressKey(result.Key); err != nil {
+		if err := s.inserter.PressKey(result.Key, result.Count); err != nil {
 			return AckResult{OK: false, Error: humanInputError(err)}
 		}
-		return AckResult{OK: true, Applied: string(result.Key)}
+		return AckResult{OK: true, Applied: result.Key.String()}
 	default:
 		if err := s.inserter.InsertText(result.Text); err != nil {
 			return AckResult{OK: false, Error: humanInputError(err)}

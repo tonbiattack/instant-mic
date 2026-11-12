@@ -66,11 +66,12 @@ data class TextMessage(val id: String, val text: String) {
     }.toString()
 }
 
-data class KeyMessage(val id: String, val key: String) {
+data class KeyMessage(val id: String, val key: String, val count: Int = 1) {
     fun toJson(): String = JSONObject().apply {
         put("type", Wire.TYPE_KEY)
         put("id", id)
         put("key", key)
+        if (count > 1) put("count", count)
     }.toString()
 }
 

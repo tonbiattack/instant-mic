@@ -51,6 +51,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        viewModel.cancelListening()
+        // Background recording is out of scope: stop cleanly so the loop cannot
+        // keep the microphone (or the battery) busy behind another app.
+        viewModel.stopListening()
     }
 }

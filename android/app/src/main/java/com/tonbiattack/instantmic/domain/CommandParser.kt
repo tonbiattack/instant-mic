@@ -14,20 +14,53 @@ object CommandParser {
     /** Maximum number of characters accepted by the receiver. */
     const val MAX_TEXT_LENGTH = 4000
 
-    private val commandKeys = mapOf(
-        "送信" to KeyAction.ENTER,
-        "改行" to KeyAction.SHIFT_ENTER,
-        "取り消し" to KeyAction.CTRL_Z,
-        "取消" to KeyAction.CTRL_Z,
-        "全選択" to KeyAction.CTRL_A,
+    private class Entry(
+        val phrase: String,
+        val command: KeyCommand,
+        val aliases: List<String> = emptyList(),
+        val allowRepeat: Boolean = false,
     )
+
+    // Mirrors builtinCommands in internal/speech/speech.go. Speech recognition
+    // only gets aliases that were actually observed ("開業" for 改行); destructive
+    // commands deliberately have no aliases so a misrecognition cannot delete
+    // text by accident.
+    private val builtinEntries = listOf(
+        Entry("送信", KeyCommand.ENTER),
+        Entry("改行", KeyCommand.SHIFT_ENTER, aliases = listOf("開業")),
+        Entry("取り消し", KeyCommand.CTRL_Z, aliases = listOf("取消")),
+        Entry("全選択", KeyCommand.CTRL_A),
+        Entry("削除", KeyCommand.BACKSPACE, aliases = listOf("バックスペース"), allowRepeat = true),
+        Entry("前の単語削除", KeyCommand.CTRL_BACKSPACE, aliases = listOf("単語削除"), allowRepeat = true),
+        Entry("行削除", KeyCommand.DELETE_LINE),
+        Entry("デリート", KeyCommand.DELETE, allowRepeat = true),
+        Entry("上", KeyCommand.UP, allowRepeat = true),
+        Entry("下", KeyCommand.DOWN, allowRepeat = true),
+        Entry("左", KeyCommand.LEFT, allowRepeat = true),
+        Entry("右", KeyCommand.RIGHT, allowRepeat = true),
+        Entry("コピー", KeyCommand.COPY),
+        Entry("貼り付け", KeyCommand.PASTE, aliases = listOf("貼りつけ")),
+        Entry("切り取り", KeyCommand.CUT),
+        Entry("やり直し", KeyCommand.REDO),
+        Entry("タブ切り替え", KeyCommand.NEXT_TAB),
+    )
+
+    private val byPhrase: Map<String, Entry> = buildMap {
+        for (entry in builtinEntries) {
+            put(normalize(entry.phrase), entry)
+            for (alias in entry.aliases) put(normalize(alias), entry)
+        }
+    }
+
+    /** Normalized built-in phrases, used to reject custom-command conflicts. */
+    fun builtinPhrases(): Set<String> = byPhrase.keys
 
     sealed interface Result {
         /** Literal text to insert. */
         data class Text(val text: String) : Result
 
-        /** A fixed key action to perform. */
-        data class Key(val action: KeyAction, val raw: String) : Result
+        /** A key sequence to perform. */
+        data class Key(val command: KeyCommand, val raw: String) : Result
 
         /** The wake prefix was used with an unsupported word. Do nothing. */
         data class UnknownCommand(val raw: String) : Result
@@ -36,7 +69,11 @@ object CommandParser {
         data object Empty : Result
     }
 
-    fun interpret(transcript: String, prefix: String = DEFAULT_PREFIX): Result {
+    fun interpret(
+        transcript: String,
+        prefix: String = DEFAULT_PREFIX,
+        custom: List<CustomCommand> = emptyList(),
+    ): Result {
         val trimmed = transcript.trim()
         if (trimmed.isEmpty()) return Result.Empty
 
@@ -54,12 +91,80 @@ object CommandParser {
         }
 
         val normRest = normalize(after)
-        val action = commandKeys[normRest]
+        builtinResult(normRest)?.let { return it }
+        customResult(normRest, custom)?.let { return it }
+
         return when {
-            action != null -> Result.Key(action, normPrefix + normRest)
             !separated && normRest.isNotEmpty() -> Result.Text(trimmed)
             else -> Result.UnknownCommand(normPrefix + normRest)
         }
+    }
+
+    private fun builtinResult(normRest: String): Result.Key? {
+        byPhrase[normRest]?.let { entry ->
+            return Result.Key(entry.command, DEFAULT_PREFIX + normRest)
+        }
+        val (base, count) = splitRepeat(normRest) ?: return null
+        val entry = byPhrase[base] ?: return null
+        if (!entry.allowRepeat) return null
+        return Result.Key(entry.command.repeated(count), DEFAULT_PREFIX + normRest)
+    }
+
+    private fun customResult(normRest: String, custom: List<CustomCommand>): Result.Key? {
+        if (custom.isEmpty()) return null
+        val match = custom.firstOrNull { normalize(it.phrase) == normRest } ?: return null
+        val canonical = KeySequence.normalize(match.sequence) ?: return null
+        return Result.Key(KeyCommand(canonical, KeySequence.label(canonical)), DEFAULT_PREFIX + normRest)
+    }
+
+    /**
+     * Splits an optional spoken repeat count. `3回削除`, `削除3回` and `三回削除`
+     * all return ("削除", 3). The count is only honoured for repeatable commands.
+     */
+    fun splitRepeat(normRest: String): Pair<String, Int>? {
+        if (normRest.isEmpty()) return null
+        val idx = normRest.indexOf("回")
+        if (idx in 1 until normRest.length) {
+            val n = parseCount(normRest.substring(0, idx))
+            if (n != null) return normRest.substring(idx + 1) to n
+        }
+        if (normRest.endsWith("回")) {
+            val body = normRest.dropLast(1)
+            var start = body.length
+            while (start > 0 && (body[start - 1].isDigit() || body[start - 1] in KANJI_DIGITS)) {
+                start--
+            }
+            if (start < body.length) {
+                val n = parseCount(body.substring(start))
+                if (n != null) return body.substring(0, start) to n
+            }
+        }
+        return null
+    }
+
+    private val KANJI_DIGITS = "一二三四五六七八九十"
+
+    private fun parseCount(value: String): Int? {
+        if (value.isEmpty()) return null
+        value.toIntOrNull()?.let { return it.takeIf { n -> n > 0 } }
+
+        val digits = mapOf('一' to 1, '二' to 2, '三' to 3, '四' to 4, '五' to 5,
+            '六' to 6, '七' to 7, '八' to 8, '九' to 9)
+        var total = 0
+        var ten = false
+        for (ch in value) {
+            when {
+                ch == '十' -> {
+                    if (ten) return null
+                    ten = true
+                    if (total == 0) total = 1
+                    total *= 10
+                }
+                digits.containsKey(ch) -> total += digits.getValue(ch)
+                else -> return null
+            }
+        }
+        return total.takeIf { it > 0 }
     }
 
     /** Folds whitespace, punctuation and width so command variants compare equal. */
@@ -100,16 +205,5 @@ object CommandParser {
             Character.OTHER_SYMBOL.toInt() -> true
             else -> false
         }
-    }
-}
-
-enum class KeyAction(val wire: String, val label: String) {
-    ENTER("enter", "Enter"),
-    SHIFT_ENTER("shift+enter", "Shift+Enter"),
-    CTRL_Z("ctrl+z", "Ctrl+Z"),
-    CTRL_A("ctrl+a", "Ctrl+A");
-
-    companion object {
-        fun fromWire(value: String): KeyAction? = entries.firstOrNull { it.wire == value }
     }
 }

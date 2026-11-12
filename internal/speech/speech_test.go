@@ -4,30 +4,90 @@ import "testing"
 
 func TestInterpretCommands(t *testing.T) {
 	cases := []struct {
-		in   string
-		kind ResultKind
-		key  Key
+		in    string
+		kind  ResultKind
+		key   string
+		count int
 	}{
-		{"コマンド、送信", KindKey, KeyEnter},
-		{"コマンド、改行", KindKey, KeyShiftEnter},
-		{"コマンド、取り消し", KindKey, KeyCtrlZ},
-		{"コマンド、全選択", KindKey, KeyCtrlA},
-		{"コマンド送信", KindKey, KeyEnter},
-		{"コマンド 送信", KindKey, KeyEnter},
-		{"コマンド　送信", KindKey, KeyEnter},
-		{"コマンド、送信。", KindKey, KeyEnter},
-		{"コマンド、送信！", KindKey, KeyEnter},
-		{"コマンド、", KindUnknownCommand, ""},
-		{"コマンド", KindUnknownCommand, ""},
-		{"コマンド、削除", KindUnknownCommand, ""},
+		{"コマンド、送信", KindKey, "enter", 1},
+		{"コマンド、改行", KindKey, "shift+enter", 1},
+		{"コマンド、取り消し", KindKey, "ctrl+z", 1},
+		{"コマンド、全選択", KindKey, "ctrl+a", 1},
+		{"コマンド送信", KindKey, "enter", 1},
+		{"コマンド 送信", KindKey, "enter", 1},
+		{"コマンド　送信", KindKey, "enter", 1},
+		{"コマンド、送信。", KindKey, "enter", 1},
+		{"コマンド、送信！", KindKey, "enter", 1},
+		{"コマンド、削除", KindKey, "backspace", 1},
+		{"コマンド、バックスペース", KindKey, "backspace", 1},
+		{"コマンド、バック スペース", KindKey, "backspace", 1},
+		{"コマンド、前の単語削除", KindKey, "ctrl+backspace", 1},
+		{"コマンド、行削除", KindKey, "home>shift+end>delete", 1},
+		{"コマンド、デリート", KindKey, "delete", 1},
+		{"コマンド、上", KindKey, "up", 1},
+		{"コマンド、下", KindKey, "down", 1},
+		{"コマンド、左", KindKey, "left", 1},
+		{"コマンド、右", KindKey, "right", 1},
+		{"コマンド、コピー", KindKey, "ctrl+c", 1},
+		{"コマンド、貼り付け", KindKey, "ctrl+v", 1},
+		{"コマンド、切り取り", KindKey, "ctrl+x", 1},
+		{"コマンド、やり直し", KindKey, "ctrl+y", 1},
+		{"コマンド、タブ切り替え", KindKey, "ctrl+tab", 1},
+		{"コマンド、3回削除", KindKey, "backspace", 3},
+		{"コマンド、削除3回", KindKey, "backspace", 3},
+		{"コマンド、三回削除", KindKey, "backspace", 3},
+		{"コマンド、10回上", KindKey, "up", 5},
+		{"コマンド、", KindUnknownCommand, "", 0},
+		{"コマンド", KindUnknownCommand, "", 0},
+		{"コマンド、存在しない", KindUnknownCommand, "", 0},
 	}
 	for _, tc := range cases {
 		got := Interpret(tc.in)
 		if got.Kind != tc.kind {
 			t.Errorf("Interpret(%q).Kind = %v, want %v", tc.in, got.Kind, tc.kind)
+			continue
 		}
-		if tc.kind == KindKey && got.Key != tc.key {
-			t.Errorf("Interpret(%q).Key = %q, want %q", tc.in, got.Key, tc.key)
+		if tc.kind != KindKey {
+			continue
+		}
+		if got.Key.String() != tc.key {
+			t.Errorf("Interpret(%q).Key = %q, want %q", tc.in, got.Key.String(), tc.key)
+		}
+		if got.Count != tc.count {
+			t.Errorf("Interpret(%q).Count = %d, want %d", tc.in, got.Count, tc.count)
+		}
+	}
+}
+
+func TestMisrecognitionAliases(t *testing.T) {
+	// The observed misrecognition for 改行 is 開業; only the whole phrase may
+	// resolve, never a sentence that merely contains it.
+	if got := Interpret("コマンド、開業"); got.Kind != KindKey || got.Key.String() != "shift+enter" {
+		t.Fatalf("コマンド、開業 -> %+v", got)
+	}
+	if got := Interpret("コマンド 開業"); got.Kind != KindKey || got.Key.String() != "shift+enter" {
+		t.Fatalf("コマンド 開業 -> %+v", got)
+	}
+	for _, in := range []string{"開業しました", "コマンド開業について説明して", "コマンド開業について教えて"} {
+		if got := Interpret(in); got.Kind != KindText {
+			t.Errorf("Interpret(%q).Kind = %v, want KindText", in, got.Kind)
+		}
+	}
+}
+
+func TestDestructiveCommandsNeedExactMatch(t *testing.T) {
+	for _, in := range []string{"コマンド削除について", "コマンド、削除する方法", "削除", "コマンド、行削除のやり方"} {
+		if got := Interpret(in); got.Kind == KindKey {
+			t.Errorf("Interpret(%q) executed %v", in, got.Key)
+		}
+	}
+}
+
+func TestRepeatOnlyForSafeCommands(t *testing.T) {
+	for _, in := range []string{"コマンド、3回送信", "コマンド、2回行削除", "コマンド、2回コピー"} {
+		got := Interpret(in)
+		if got.Kind == KindKey {
+			t.Errorf("Interpret(%q) repeated a command that must not repeat: %v", in, got.Key)
 		}
 	}
 }
@@ -42,6 +102,7 @@ func TestInterpretText(t *testing.T) {
 		"コマンドを実行",
 		"、送信",
 		"改行します",
+		"削除しました",
 	}
 	for _, in := range cases {
 		got := Interpret(in)
@@ -66,7 +127,7 @@ func TestInterpretFullWidth(t *testing.T) {
 	// Full-width Latin cannot produce a command, but full-width spaces must not
 	// break the prefix/word split.
 	got := Interpret("コマンド　、　送信")
-	if got.Kind != KindKey || got.Key != KeyEnter {
+	if got.Kind != KindKey || got.Key.String() != "enter" {
 		t.Fatalf("got %+v, want enter", got)
 	}
 }
@@ -85,13 +146,68 @@ func TestNormalizeFoldsVariants(t *testing.T) {
 	}
 }
 
-func TestIsKnownKey(t *testing.T) {
-	for _, k := range []Key{KeyEnter, KeyShiftEnter, KeyCtrlZ, KeyCtrlA} {
-		if !IsKnownKey(k) {
-			t.Errorf("IsKnownKey(%q) = false", k)
+func TestParseSequence(t *testing.T) {
+	good := map[string]string{
+		"enter":                 "enter",
+		"SHIFT+ENTER":           "shift+enter",
+		" ctrl + backspace ":    "ctrl+backspace",
+		"home>shift+end>delete": "home>shift+end>delete",
+		"esc":                   "escape",
+		"ctrl+shift+k":          "ctrl+shift+k",
+		"f5":                    "f5",
+		"win+up":                "win+up",
+		"pgdn":                  "pagedown",
+		"a":                     "a",
+	}
+	for in, want := range good {
+		seq, err := ParseSequence(in)
+		if err != nil {
+			t.Errorf("ParseSequence(%q): %v", in, err)
+			continue
+		}
+		if got := seq.String(); got != want {
+			t.Errorf("ParseSequence(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if IsKnownKey(Key("ctrl+x")) {
-		t.Error("unknown key accepted")
+
+	bad := []string{
+		"", "ctrl", "ctrl+", "+a", "hyper+a", "ctrl+alt+delete",
+		"enter>enter>enter>enter>enter>enter>enter>enter>enter",
+		"ctrl+a+b", "a+b", "ctrl+ctrl+a",
+	}
+	for _, in := range bad {
+		if seq, err := ParseSequence(in); err == nil {
+			t.Errorf("ParseSequence(%q) = %q, want error", in, seq)
+		}
+	}
+}
+
+func TestSequenceLabel(t *testing.T) {
+	seq, err := ParseSequence("home>shift+end>delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seq.Label(); got != "Home → Shift+End → Delete" {
+		t.Fatalf("label = %q", got)
+	}
+}
+
+func TestIsKnownKey(t *testing.T) {
+	for _, name := range []string{"enter", "shift", "backspace", "delete", "pageup", "f1", "f24", "k", "7"} {
+		if name == "shift" {
+			// Modifiers are not keys; a chord of only "shift" must be rejected.
+			if _, err := ParseSequence(name); err == nil {
+				t.Error("modifier-only sequence accepted")
+			}
+			continue
+		}
+		if !IsKnownKeyName(name) {
+			t.Errorf("IsKnownKeyName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"", "ctrl", "f25", "hyper", "ab"} {
+		if IsKnownKeyName(name) {
+			t.Errorf("IsKnownKeyName(%q) = true", name)
+		}
 	}
 }

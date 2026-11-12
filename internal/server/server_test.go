@@ -23,10 +23,15 @@ import (
 type fakeInserter struct {
 	mu       sync.Mutex
 	texts    []string
-	keys     []speech.Key
+	keys     []keyPress
 	status   input.Status
 	failText error
 	failKey  error
+}
+
+type keyPress struct {
+	sequence string
+	count    int
 }
 
 func (f *fakeInserter) InsertText(text string) error {
@@ -42,7 +47,7 @@ func (f *fakeInserter) InsertText(text string) error {
 	return nil
 }
 
-func (f *fakeInserter) PressKey(key speech.Key) error {
+func (f *fakeInserter) PressKey(seq speech.Sequence, count int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.status.HasFocus {
@@ -51,16 +56,16 @@ func (f *fakeInserter) PressKey(key speech.Key) error {
 	if f.failKey != nil {
 		return f.failKey
 	}
-	f.keys = append(f.keys, key)
+	f.keys = append(f.keys, keyPress{sequence: seq.String(), count: count})
 	return nil
 }
 
 func (f *fakeInserter) Status() input.Status { return f.status }
 
-func (f *fakeInserter) snapshot() ([]string, []speech.Key) {
+func (f *fakeInserter) snapshot() ([]string, []keyPress) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.texts...), append([]speech.Key(nil), f.keys...)
+	return append([]string(nil), f.texts...), append([]keyPress(nil), f.keys...)
 }
 
 type testEnv struct {
@@ -183,7 +188,7 @@ func TestCommandIsNotTyped(t *testing.T) {
 	if len(texts) != 0 {
 		t.Fatalf("command was typed as text: %v", texts)
 	}
-	if len(keys) != 1 || keys[0] != speech.KeyEnter {
+	if len(keys) != 1 || keys[0].sequence != "enter" || keys[0].count != 1 {
 		t.Fatalf("keys = %v", keys)
 	}
 }
@@ -331,7 +336,7 @@ func TestKeyMessage(t *testing.T) {
 		t.Fatalf("ack = %+v", ack)
 	}
 	_, keys := env.ins.snapshot()
-	if len(keys) != 1 || keys[0] != speech.KeyShiftEnter {
+	if len(keys) != 1 || keys[0].sequence != "shift+enter" || keys[0].count != 1 {
 		t.Fatalf("keys = %v", keys)
 	}
 }
@@ -341,17 +346,70 @@ func TestUnsupportedKeyRejected(t *testing.T) {
 	token := env.pair(t, "dev-1")
 	ws := env.connect(t, "dev-1", token)
 
-	_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: "k-2", Key: "ctrl+alt+del"})
-	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
-	var e protocol.Error
-	if err := ws.ReadJSON(&e); err != nil {
-		t.Fatal(err)
-	}
-	if e.Code != "bad_key" {
-		t.Fatalf("error = %+v", e)
+	for i, bad := range []string{"ctrl+alt+delete", "hyper+x", "ctrl", "a+b"} {
+		id := "k-bad-" + string(rune('a'+i))
+		_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: id, Key: bad})
+		_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var e protocol.Error
+		if err := ws.ReadJSON(&e); err != nil {
+			t.Fatalf("%s: %v", bad, err)
+		}
+		if e.Code != "bad_key" {
+			t.Fatalf("%s: error = %+v", bad, e)
+		}
 	}
 	_, keys := env.ins.snapshot()
 	if len(keys) != 0 {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+func TestKeySequenceAndRepeat(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Key{
+		Type: protocol.TypeKey, ID: "seq-1", Key: "home>shift+end>delete",
+	})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "home>shift+end>delete" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: "seq-2", Key: "backspace", Count: 3})
+	ack = readAck(t, ws)
+	if !ack.OK || ack.Applied != "backspace" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	_, keys := env.ins.snapshot()
+	if len(keys) != 2 {
+		t.Fatalf("keys = %v", keys)
+	}
+	if keys[0].sequence != "home>shift+end>delete" || keys[0].count != 1 {
+		t.Fatalf("first key = %+v", keys[0])
+	}
+	if keys[1].sequence != "backspace" || keys[1].count != 3 {
+		t.Fatalf("second key = %+v", keys[1])
+	}
+}
+
+func TestVoiceCommandBackspaceIsNotTyped(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "cmd-bs", Text: "コマンド、削除"})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "backspace" {
+		t.Fatalf("ack = %+v", ack)
+	}
+	texts, keys := env.ins.snapshot()
+	if len(texts) != 0 {
+		t.Fatalf("command was typed: %v", texts)
+	}
+	if len(keys) != 1 || keys[0].sequence != "backspace" {
 		t.Fatalf("keys = %v", keys)
 	}
 }

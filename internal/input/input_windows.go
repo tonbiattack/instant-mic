@@ -26,10 +26,78 @@ const (
 
 	vkShift   = 0x10
 	vkControl = 0x11
+	vkMenu    = 0x12
+	vkLWin    = 0x5B
 	vkReturn  = 0x0D
 
 	processQueryLimitedInformation = 0x1000
 )
+
+// vkKeys maps the allowlisted key names from internal/speech to virtual-key
+// codes. Keys that Windows treats as extended also need the extended flag.
+var vkKeys = map[string]struct {
+	code     uint16
+	extended bool
+}{
+	"enter":     {0x0D, false},
+	"tab":       {0x09, false},
+	"escape":    {0x1B, false},
+	"backspace": {0x08, false},
+	"delete":    {0x2E, true},
+	"insert":    {0x2D, true},
+	"space":     {0x20, false},
+	"up":        {0x26, true},
+	"down":      {0x28, true},
+	"left":      {0x25, true},
+	"right":     {0x27, true},
+	"home":      {0x24, true},
+	"end":       {0x23, true},
+	"pageup":    {0x21, true},
+	"pagedown":  {0x22, true},
+}
+
+func modifierVK(m speech.Modifier) (uint16, bool, bool) {
+	switch m {
+	case speech.ModCtrl:
+		return vkControl, false, true
+	case speech.ModShift:
+		return vkShift, false, true
+	case speech.ModAlt:
+		return vkMenu, false, true
+	case speech.ModWin:
+		return vkLWin, true, true
+	}
+	return 0, false, false
+}
+
+// keyVK resolves a single key name to its virtual-key code.
+func keyVK(key string) (uint16, bool, bool) {
+	if k, ok := vkKeys[key]; ok {
+		return k.code, k.extended, true
+	}
+	if len(key) == 1 {
+		r := rune(key[0])
+		switch {
+		case r >= 'a' && r <= 'z':
+			return uint16(r - 'a' + 'A'), false, true
+		case r >= '0' && r <= '9':
+			return uint16(r), false, true
+		}
+	}
+	if len(key) >= 2 && len(key) <= 3 && key[0] == 'f' {
+		var n int
+		for _, r := range key[1:] {
+			if r < '0' || r > '9' {
+				return 0, false, false
+			}
+			n = n*10 + int(r-'0')
+		}
+		if n >= 1 && n <= 24 {
+			return uint16(0x70 + n - 1), false, true
+		}
+	}
+	return 0, false, false
+}
 
 type keybdInput struct {
 	Vk        uint16
@@ -118,12 +186,20 @@ func (w *WindowsInserter) InsertText(text string) error {
 	return sendInputs(unicodeInputs(text))
 }
 
-func keyDown(vk uint16) inputUnion {
-	return inputUnion{Type: inputKeyboard, Ki: keybdInput{Vk: vk}}
+func keyDown(vk uint16, extended bool) inputUnion {
+	var flags uint32
+	if extended {
+		flags |= keyeventfExtended
+	}
+	return inputUnion{Type: inputKeyboard, Ki: keybdInput{Vk: vk, Flags: flags}}
 }
 
-func keyUp(vk uint16) inputUnion {
-	return inputUnion{Type: inputKeyboard, Ki: keybdInput{Vk: vk, Flags: keyeventfKeyUp}}
+func keyUp(vk uint16, extended bool) inputUnion {
+	flags := uint32(keyeventfKeyUp)
+	if extended {
+		flags |= keyeventfExtended
+	}
+	return inputUnion{Type: inputKeyboard, Ki: keybdInput{Vk: vk, Flags: flags}}
 }
 
 func (w *WindowsInserter) checkTarget() error {
@@ -137,44 +213,69 @@ func (w *WindowsInserter) checkTarget() error {
 	return nil
 }
 
-// PressKey presses a supported key combination.
-func (w *WindowsInserter) PressKey(key speech.Key) error {
+// PressKey presses a validated key sequence count times.
+func (w *WindowsInserter) PressKey(seq speech.Sequence, count int) error {
+	if len(seq) == 0 {
+		return errors.New("empty key sequence")
+	}
+	if len(seq) > speech.MaxSequenceSteps {
+		return errors.New("key sequence is too long")
+	}
+	if count < 1 {
+		count = 1
+	}
+	if count > speech.MaxRepeat {
+		count = speech.MaxRepeat
+	}
+
+	inputs := make([]inputUnion, 0, len(seq)*12*count)
+	for i := 0; i < count; i++ {
+		for _, combo := range seq {
+			chord, err := comboInputs(combo)
+			if err != nil {
+				return err
+			}
+			inputs = append(inputs, chord...)
+		}
+	}
+
 	if err := w.checkTarget(); err != nil {
 		return err
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	return sendInputs(inputs)
+}
 
-	switch key {
-	case speech.KeyEnter:
-		return sendInputs([]inputUnion{
-			keyDown(vkReturn),
-			keyUp(vkReturn),
-		})
-	case speech.KeyShiftEnter:
-		return sendInputs([]inputUnion{
-			keyDown(vkShift),
-			keyDown(vkReturn),
-			keyUp(vkReturn),
-			keyUp(vkShift),
-		})
-	case speech.KeyCtrlZ:
-		return sendInputs([]inputUnion{
-			keyDown(vkControl),
-			keyDown('Z'),
-			keyUp('Z'),
-			keyUp(vkControl),
-		})
-	case speech.KeyCtrlA:
-		return sendInputs([]inputUnion{
-			keyDown(vkControl),
-			keyDown('A'),
-			keyUp('A'),
-			keyUp(vkControl),
-		})
-	default:
-		return fmt.Errorf("unsupported key %q", key)
+// comboInputs builds the down/up events for one chord: modifiers down, key
+// down, key up, modifiers up (in reverse order).
+func comboInputs(combo speech.Combo) ([]inputUnion, error) {
+	type downKey struct {
+		vk       uint16
+		extended bool
 	}
+	var mods []downKey
+	for _, m := range combo.Mods {
+		vk, extended, ok := modifierVK(m)
+		if !ok {
+			return nil, fmt.Errorf("unsupported modifier %q", m)
+		}
+		mods = append(mods, downKey{vk, extended})
+	}
+	vk, extended, ok := keyVK(combo.Key)
+	if !ok {
+		return nil, fmt.Errorf("unsupported key %q", combo.Key)
+	}
+
+	events := make([]inputUnion, 0, len(mods)*2+2)
+	for _, m := range mods {
+		events = append(events, keyDown(m.vk, m.extended))
+	}
+	events = append(events, keyDown(vk, extended), keyUp(vk, extended))
+	for i := len(mods) - 1; i >= 0; i-- {
+		events = append(events, keyUp(mods[i].vk, mods[i].extended))
+	}
+	return events, nil
 }
 
 // Status inspects the foreground window.
