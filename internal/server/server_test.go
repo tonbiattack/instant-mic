@@ -1,0 +1,444 @@
+package server
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/tonbiattack/instant-mic/internal/config"
+	"github.com/tonbiattack/instant-mic/internal/input"
+	"github.com/tonbiattack/instant-mic/internal/netutil"
+	"github.com/tonbiattack/instant-mic/internal/protocol"
+	"github.com/tonbiattack/instant-mic/internal/speech"
+)
+
+type fakeInserter struct {
+	mu       sync.Mutex
+	texts    []string
+	keys     []speech.Key
+	status   input.Status
+	failText error
+	failKey  error
+}
+
+func (f *fakeInserter) InsertText(text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.status.HasFocus {
+		return input.ErrNoFocus
+	}
+	if f.failText != nil {
+		return f.failText
+	}
+	f.texts = append(f.texts, text)
+	return nil
+}
+
+func (f *fakeInserter) PressKey(key speech.Key) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.status.HasFocus {
+		return input.ErrNoFocus
+	}
+	if f.failKey != nil {
+		return f.failKey
+	}
+	f.keys = append(f.keys, key)
+	return nil
+}
+
+func (f *fakeInserter) Status() input.Status { return f.status }
+
+func (f *fakeInserter) snapshot() ([]string, []speech.Key) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.texts...), append([]speech.Key(nil), f.keys...)
+}
+
+type testEnv struct {
+	srv     *Server
+	store   *config.Store
+	ins     *fakeInserter
+	wsURL   string
+	httpURL string
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := config.Open(dir + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ins := &fakeInserter{status: input.Status{HasFocus: true, Title: "メモ帳"}}
+	srv := New(Config{Store: store, Inserter: ins})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.StartListener(ln)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	base := "http://" + ln.Addr().String()
+	return &testEnv{srv: srv, store: store, ins: ins, wsURL: "ws://" + ln.Addr().String() + "/ws", httpURL: base}
+}
+
+func (e *testEnv) pair(t *testing.T, deviceID string) string {
+	t.Helper()
+	code, _, err := e.srv.BeginPairing(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader(`{"code":"` + code + `","deviceId":"` + deviceID + `","deviceName":"テスト端末"}`)
+	resp, err := http.Post(e.httpURL+"/pair", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair status = %d", resp.StatusCode)
+	}
+	var pr pairResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	return pr.Token
+}
+
+func (e *testEnv) connect(t *testing.T, deviceID, token string) *websocket.Conn {
+	t.Helper()
+	ws, _, err := websocket.DefaultDialer.Dial(e.wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ws.Close() })
+	auth := protocol.Auth{
+		Type: protocol.TypeAuth, Protocol: protocol.Version,
+		DeviceID: deviceID, DeviceName: "テスト端末", Token: token,
+	}
+	if err := ws.WriteJSON(auth); err != nil {
+		t.Fatal(err)
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ready protocol.Ready
+	if err := ws.ReadJSON(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if ready.Type != protocol.TypeReady {
+		t.Fatalf("expected ready, got %q", ready.Type)
+	}
+	return ws
+}
+
+func readAck(t *testing.T, ws *websocket.Conn) protocol.Ack {
+	t.Helper()
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ack protocol.Ack
+	if err := ws.ReadJSON(&ack); err != nil {
+		t.Fatal(err)
+	}
+	return ack
+}
+
+func TestPairAndTypeText(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	if err := ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "op-1", Text: "こんにちは"}); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAck(t, ws)
+	if !ack.OK || ack.ID != "op-1" || ack.Applied != "text" {
+		t.Fatalf("unexpected ack: %+v", ack)
+	}
+	texts, _ := env.ins.snapshot()
+	if len(texts) != 1 || texts[0] != "こんにちは" {
+		t.Fatalf("typed = %v", texts)
+	}
+}
+
+func TestCommandIsNotTyped(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	if err := ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "cmd-1", Text: "コマンド、送信"}); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "enter" {
+		t.Fatalf("unexpected ack: %+v", ack)
+	}
+	texts, keys := env.ins.snapshot()
+	if len(texts) != 0 {
+		t.Fatalf("command was typed as text: %v", texts)
+	}
+	if len(keys) != 1 || keys[0] != speech.KeyEnter {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+func TestSentenceWithSendIsTyped(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	msg := "この文章を送信してください"
+	if err := ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "t-1", Text: msg}); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAck(t, ws)
+	if !ack.OK {
+		t.Fatalf("ack = %+v", ack)
+	}
+	texts, keys := env.ins.snapshot()
+	if len(keys) != 0 {
+		t.Fatalf("unexpected key: %v", keys)
+	}
+	if len(texts) != 1 || texts[0] != msg {
+		t.Fatalf("texts = %v", texts)
+	}
+}
+
+func TestDuplicateOperationExecutesOnce(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	msg := protocol.Text{Type: protocol.TypeText, ID: "dup-1", Text: "一度だけ"}
+	for i := 0; i < 2; i++ {
+		if err := ws.WriteJSON(msg); err != nil {
+			t.Fatal(err)
+		}
+		ack := readAck(t, ws)
+		if !ack.OK {
+			t.Fatalf("ack = %+v", ack)
+		}
+		if i == 1 && !ack.Duplicate {
+			t.Fatalf("second ack should be marked duplicate: %+v", ack)
+		}
+	}
+	texts, _ := env.ins.snapshot()
+	if len(texts) != 1 {
+		t.Fatalf("typed %d times, want 1", len(texts))
+	}
+}
+
+func TestUnknownDeviceRejected(t *testing.T) {
+	env := newTestEnv(t)
+	ws, _, err := websocket.DefaultDialer.Dial(env.wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	_ = ws.WriteJSON(protocol.Auth{
+		Type: protocol.TypeAuth, Protocol: protocol.Version,
+		DeviceID: "stranger", Token: "nope",
+	})
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var e protocol.Error
+	if err := ws.ReadJSON(&e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != "auth_failed" {
+		t.Fatalf("error = %+v", e)
+	}
+}
+
+func TestWrongPairingCode(t *testing.T) {
+	env := newTestEnv(t)
+	_, _, err := env.srv.BeginPairing(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader(`{"code":"000000","deviceId":"dev-x"}`)
+	resp, err := http.Post(env.httpURL+"/pair", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestPairingClosedByDefault(t *testing.T) {
+	env := newTestEnv(t)
+	body := strings.NewReader(`{"code":"123456","deviceId":"dev-x"}`)
+	resp, err := http.Post(env.httpURL+"/pair", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410", resp.StatusCode)
+	}
+}
+
+func TestBrowserOriginRejected(t *testing.T) {
+	env := newTestEnv(t)
+	req := httptest.NewRequest(http.MethodPost, "/pair", strings.NewReader(`{}`))
+	req.Header.Set("Origin", "http://evil.example")
+	rec := httptest.NewRecorder()
+	env.srv.handlePair(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+
+	_, resp, err := websocket.DefaultDialer.Dial(env.wsURL, http.Header{"Origin": {"http://evil.example"}})
+	if err == nil {
+		t.Fatal("browser origin was allowed")
+	}
+	if resp != nil && resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestNoFocusReportsError(t *testing.T) {
+	env := newTestEnv(t)
+	env.ins.status = input.Status{}
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "nf-1", Text: "文字"})
+	ack := readAck(t, ws)
+	if ack.OK {
+		t.Fatalf("expected failure: %+v", ack)
+	}
+	if ack.Error == "" {
+		t.Fatal("missing error message")
+	}
+}
+
+func TestKeyMessage(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: "k-1", Key: "shift+enter"})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "shift+enter" {
+		t.Fatalf("ack = %+v", ack)
+	}
+	_, keys := env.ins.snapshot()
+	if len(keys) != 1 || keys[0] != speech.KeyShiftEnter {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+func TestUnsupportedKeyRejected(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: "k-2", Key: "ctrl+alt+del"})
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var e protocol.Error
+	if err := ws.ReadJSON(&e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != "bad_key" {
+		t.Fatalf("error = %+v", e)
+	}
+	_, keys := env.ins.snapshot()
+	if len(keys) != 0 {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+func TestRepairReplacesToken(t *testing.T) {
+	env := newTestEnv(t)
+	first := env.pair(t, "dev-1")
+	second := env.pair(t, "dev-1")
+	if first == second {
+		t.Fatal("re-pairing must issue a new token")
+	}
+
+	ws, _, err := websocket.DefaultDialer.Dial(env.wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	_ = ws.WriteJSON(protocol.Auth{
+		Type: protocol.TypeAuth, Protocol: protocol.Version,
+		DeviceID: "dev-1", Token: first,
+	})
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var e protocol.Error
+	if err := ws.ReadJSON(&e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != "auth_failed" {
+		t.Fatalf("old token still works: %+v", e)
+	}
+}
+
+func TestPingPong(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Ping{Type: protocol.TypePing, ID: "p-1", SentAt: 123})
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var pong protocol.Pong
+	if err := ws.ReadJSON(&pong); err != nil {
+		t.Fatal(err)
+	}
+	if pong.ID != "p-1" || pong.SentAt != 123 || pong.RecvAt == 0 {
+		t.Fatalf("pong = %+v", pong)
+	}
+}
+
+func TestTLSListener(t *testing.T) {
+	dir := t.TempDir()
+	store, err := config.Open(dir + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, fp, err := netutil.EnsureCert(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fp) != 64 {
+		t.Fatalf("fingerprint = %q", fp)
+	}
+	_, again, err := netutil.EnsureCert(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != fp {
+		t.Fatal("certificate was regenerated instead of reused")
+	}
+
+	ins := &fakeInserter{status: input.Status{HasFocus: true}}
+	srv := New(Config{
+		Store:    store,
+		Inserter: ins,
+		TLS:      &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.StartListener(tls.NewListener(ln, srv.tls))
+	t.Cleanup(func() { _ = srv.Close() })
+
+	dialer := &websocket.Dialer{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // self-signed, pinned by fingerprint
+	}
+	ws, _, err := dialer.Dial("wss://"+ln.Addr().String()+"/ws", nil)
+	if err != nil {
+		t.Fatalf("TLS dial: %v", err)
+	}
+	defer ws.Close()
+}

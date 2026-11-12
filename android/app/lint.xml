@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The receiver is a LAN appliance with a locally generated certificate, so the
+  app deliberately pins a single fingerprint (see Tls.kt). The lint warning is
+  about trusting arbitrary certificates, which this app does not do.
+-->
+<lint>
+    <issue id="CustomX509TrustManager" severity="ignore" />
+    <issue id="TrustAllX509TrustManager" severity="ignore" />
+    <issue id="ObsoleteSdkInt" severity="ignore" />
+</lint>
