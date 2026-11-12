@@ -50,15 +50,26 @@ server → client {"type":"ack","id":"op-…","ok":true,"applied":"text","elapse
 ### キー
 
 ```
-client → server {"type":"key","id":"op-…","key":"enter"}
+client → server {"type":"key","id":"op-…","key":"ctrl+backspace"}
+client → server {"type":"key","id":"op-…","key":"home>shift+end>delete"}
+client → server {"type":"key","id":"op-…","key":"backspace","count":3}
 ```
 
-`key` は `enter` / `shift+enter` / `ctrl+z` / `ctrl+a` のみ。
+`key` は検証済みのキー列。
+
+- 1ステップは修飾キー + 1キー: `ctrl+z`、`shift+enter`、`alt+f4`、`win+up`
+- `>` で最大8ステップの連続操作: `home>shift+end>delete`
+- 修飾キーは `ctrl` / `shift` / `alt` / `win`
+- 通常キーは `enter` / `tab` / `escape` / `backspace` / `delete` / `insert` / `space` / `up` / `down` / `left` / `right` / `home` / `end` / `pageup` / `pagedown` / `a`〜`z` / `0`〜`9` / `f1`〜`f24`
+- `count` は任意で 1〜5。同じキー列を繰り返す（省略時 1）
+- 上記以外のキー、2つ以上のキーを含むステップ、修飾キーの重複、`ctrl+alt+delete` は `bad_key` として拒否する
+- 受信側は許可されたキーだけを `SendInput` に渡す。Android 側だけの検証には依存しない
 
 ### ACK
 
 ```
 {"type":"ack","id":"op-…","ok":true,"applied":"enter","elapsedMs":2}
+{"type":"ack","id":"op-…","ok":true,"applied":"home>shift+end>delete","elapsedMs":3}
 {"type":"ack","id":"op-…","ok":false,"error":"入力先のウィンドウがありません"}
 {"type":"ack","id":"op-…","ok":true,"duplicate":true}
 ```
@@ -74,8 +85,10 @@ client → server {"type":"key","id":"op-…","key":"enter"}
 
 ## コマンド解釈
 
-- 接頭語（既定 `コマンド`）+ 区切り（`、` や空白）+ コマンド語 の**完全一致**のみ実行
-- 対応: `送信`→Enter、`改行`→Shift+Enter、`取り消し`/`取消`→Ctrl+Z、`全選択`→Ctrl+A
+- 接頭語（既定 `コマンド`）+ 区切り（`、` や空白）+ コマンド語 の**全体一致**のみ実行
+- 対応: `送信`→Enter、`改行`→Shift+Enter、`削除`/`バックスペース`→Backspace、`前の単語削除`→Ctrl+Backspace、`行削除`→`home>shift+end>delete`、`デリート`→Delete、`上/下/左/右`→矢印、`コピー/貼り付け/切り取り`→Ctrl+C/V/X、`やり直し`→Ctrl+Y、`タブ切り替え`→Ctrl+Tab、`取り消し`/`取消`→Ctrl+Z、`全選択`→Ctrl+A
+- 繰り返し: `3回削除` / `削除3回` / `三回削除`（対象は削除・デリート・前の単語削除・矢印。上限5回）
+- 誤変換の別名: `開業`→改行、`取消`→取り消し、`バックスペース`→削除 など、実測されたものだけを明示登録する
 - 文中に「送信」が含まれても実行しない。`コマンド一覧を教えて` のような語も通常テキスト扱い
 - 部分結果（interim）は送信しない。確定結果のみ
 - 未知のコマンド語は何も入力せずエラーを返す

@@ -63,6 +63,15 @@ func TestDecodeKey(t *testing.T) {
 	if _, err := DecodeKey([]byte(`{"type":"text","id":"op-1","key":"enter"}`)); err == nil {
 		t.Fatal("wrong type accepted")
 	}
+	// A repeat count outside 1-5 is rejected before any injection happens.
+	for _, s := range []string{
+		`{"type":"key","id":"op-1","key":"backspace","count":6}`,
+		`{"type":"key","id":"op-1","key":"backspace","count":-1}`,
+	} {
+		if _, err := DecodeKey([]byte(s)); err == nil {
+			t.Errorf("DecodeKey(%q) succeeded", s)
+		}
+	}
 }
 
 func TestValidID(t *testing.T) {

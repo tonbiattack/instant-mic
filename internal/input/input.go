@@ -29,8 +29,10 @@ type Status struct {
 type Inserter interface {
 	// InsertText types text into the currently focused window.
 	InsertText(text string) error
-	// PressKey performs a fixed key combination.
-	PressKey(key speech.Key) error
+	// PressKey performs a validated key sequence count times. The receiver
+	// validates the sequence before this call, so implementations can assume it
+	// only contains allowlisted keys.
+	PressKey(seq speech.Sequence, count int) error
 	// Status inspects the current foreground window.
 	Status() Status
 }

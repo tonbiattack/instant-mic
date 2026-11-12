@@ -71,11 +71,13 @@ type Text struct {
 	Text string `json:"text"`
 }
 
-// Key asks the receiver to press a fixed key combination.
+// Key asks the receiver to press a validated key sequence.
 type Key struct {
 	Type string `json:"type"`
 	ID   string `json:"id"`
 	Key  string `json:"key"`
+	// Count repeats the sequence 1-5 times (optional, defaults to 1).
+	Count int `json:"count,omitempty"`
 }
 
 // Ping is a keepalive and round-trip measurement request.
@@ -158,6 +160,9 @@ func DecodeKey(data []byte) (Key, error) {
 	}
 	if m.Key == "" {
 		return m, errors.New("missing key")
+	}
+	if m.Count < 0 || m.Count > 5 {
+		return m, errors.New("count out of range")
 	}
 	return m, nil
 }

@@ -1,29 +1,60 @@
 package com.tonbiattack.instantmic.domain
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CommandParserTest {
 
-    private fun interpret(text: String) = CommandParser.interpret(text)
+    private fun interpret(text: String, custom: List<CustomCommand> = emptyList()) =
+        CommandParser.interpret(text, custom = custom)
 
     @Test
-    fun `commands map to key actions`() {
+    fun `commands map to key sequences`() {
         val cases = mapOf(
-            "コマンド、送信" to KeyAction.ENTER,
-            "コマンド、改行" to KeyAction.SHIFT_ENTER,
-            "コマンド、取り消し" to KeyAction.CTRL_Z,
-            "コマンド、全選択" to KeyAction.CTRL_A,
-            "コマンド送信" to KeyAction.ENTER,
-            "コマンド 送信" to KeyAction.ENTER,
-            "コマンド　送信" to KeyAction.ENTER,
-            "コマンド、送信。" to KeyAction.ENTER,
+            "コマンド、送信" to "enter",
+            "コマンド、改行" to "shift+enter",
+            "コマンド、取り消し" to "ctrl+z",
+            "コマンド、全選択" to "ctrl+a",
+            "コマンド、削除" to "backspace",
+            "コマンド、バックスペース" to "backspace",
+            "コマンド、バック スペース" to "backspace",
+            "コマンド、前の単語削除" to "ctrl+backspace",
+            "コマンド、行削除" to "home>shift+end>delete",
+            "コマンド、デリート" to "delete",
+            "コマンド、上" to "up",
+            "コマンド、下" to "down",
+            "コマンド、左" to "left",
+            "コマンド、右" to "right",
+            "コマンド、コピー" to "ctrl+c",
+            "コマンド、貼り付け" to "ctrl+v",
+            "コマンド、切り取り" to "ctrl+x",
+            "コマンド、やり直し" to "ctrl+y",
+            "コマンド、タブ切り替え" to "ctrl+tab",
+            "コマンド送信" to "enter",
+            "コマンド 送信" to "enter",
+            "コマンド　送信" to "enter",
+            "コマンド、送信。" to "enter",
         )
         for ((input, expected) in cases) {
             val result = interpret(input)
             assertTrue("$input -> $result", result is CommandParser.Result.Key)
-            assertEquals(input, expected, (result as CommandParser.Result.Key).action)
+            assertEquals(input, expected, (result as CommandParser.Result.Key).command.wire)
+        }
+    }
+
+    @Test
+    fun `misrecognised kaiGyou resolves only as a whole phrase`() {
+        for (input in listOf("コマンド、開業", "コマンド開業", "コマンド 開業", "コマンド、開業。")) {
+            val result = interpret(input)
+            assertTrue("$input -> $result", result is CommandParser.Result.Key)
+            assertEquals(input, "shift+enter", (result as CommandParser.Result.Key).command.wire)
+        }
+        for (input in listOf("開業しました", "コマンド開業について説明して", "コマンド開業について教えて")) {
+            val result = interpret(input)
+            assertTrue("$input -> $result", result is CommandParser.Result.Text)
         }
     }
 
@@ -38,6 +69,8 @@ class CommandParserTest {
             "コマンドを実行",
             "、送信",
             "改行します",
+            "削除しました",
+            "コマンド削除について",
         )
         for (input in sentences) {
             val result = interpret(input)
@@ -54,8 +87,28 @@ class CommandParserTest {
 
     @Test
     fun `unknown command does nothing`() {
-        for (input in listOf("コマンド、削除", "コマンド、", "コマンド")) {
+        for (input in listOf("コマンド、存在しない", "コマンド、", "コマンド")) {
             assertTrue(input, interpret(input) is CommandParser.Result.UnknownCommand)
+        }
+    }
+
+    @Test
+    fun `repeat count is honoured only for repeatable commands`() {
+        val cases = mapOf(
+            "コマンド、3回削除" to (3 to "backspace"),
+            "コマンド、削除3回" to (3 to "backspace"),
+            "コマンド、三回削除" to (3 to "backspace"),
+            "コマンド、10回上" to (5 to "up"),
+        )
+        for ((input, expected) in cases) {
+            val result = interpret(input)
+            assertTrue("$input -> $result", result is CommandParser.Result.Key)
+            val key = result as CommandParser.Result.Key
+            assertEquals(input, expected.first, key.command.count)
+            assertEquals(input, expected.second, key.command.wire)
+        }
+        for (input in listOf("コマンド、3回送信", "コマンド、2回行削除", "コマンド、2回コピー")) {
+            assertTrue(input, interpret(input) !is CommandParser.Result.Key)
         }
     }
 
@@ -63,12 +116,52 @@ class CommandParserTest {
     fun `custom prefix is honoured`() {
         val result = CommandParser.interpret("マイク、送信", prefix = "マイク")
         assertTrue(result is CommandParser.Result.Key)
-        assertEquals(KeyAction.ENTER, (result as CommandParser.Result.Key).action)
+        assertEquals("enter", (result as CommandParser.Result.Key).command.wire)
+    }
+
+    @Test
+    fun `custom commands resolve on whole phrase only`() {
+        val custom = listOf(CustomCommand("AIに送信", "ctrl+enter"))
+        val hit = interpret("コマンド、AIに送信", custom)
+        assertTrue("$hit", hit is CommandParser.Result.Key)
+        assertEquals("ctrl+enter", (hit as CommandParser.Result.Key).command.wire)
+
+        // With an explicit separator this is an unknown command, not text: the
+        // wake word was spoken and nothing is typed.
+        val miss = interpret("コマンド、AIに送信してみた", custom)
+        assertTrue("$miss", miss is CommandParser.Result.UnknownCommand)
+    }
+
+    @Test
+    fun `custom commands cannot shadow built-ins`() {
+        // The built-in table wins, so a conflicting custom entry cannot change
+        // what 削除 does.
+        val custom = listOf(CustomCommand("削除", "ctrl+alt+delete"))
+        val result = interpret("コマンド、削除", custom)
+        assertEquals("backspace", (result as CommandParser.Result.Key).command.wire)
+        assertTrue(
+            CustomCommands.validate("削除", "ctrl+c", emptyList()).isNotEmpty(),
+        )
     }
 
     @Test
     fun `normalize folds punctuation and width`() {
         assertEquals(CommandParser.normalize("送信"), CommandParser.normalize(" 送 信 "))
         assertEquals(CommandParser.normalize("送信"), CommandParser.normalize("送信。"))
+    }
+
+    @Test
+    fun `key sequences normalise and reject unknown keys`() {
+        assertEquals("ctrl+shift+k", KeySequence.normalize(" SHIFT + CTRL + K "))
+        assertEquals("home>shift+end>delete", KeySequence.normalize("home > shift+end > delete"))
+        assertEquals("escape", KeySequence.normalize("esc"))
+        assertNull(KeySequence.normalize("hyper+a"))
+        assertNull(KeySequence.normalize("ctrl+alt+delete"))
+        assertNull(KeySequence.normalize("ctrl"))
+        assertEquals("Home → Shift+End → Delete", KeySequence.label("home>shift+end>delete"))
+
+        // Custom commands only accept allowlisted keys.
+        assertNotNull(KeySequence.normalize("ctrl+enter"))
+        assertNull(KeySequence.normalize("ctrl+mediaplay"))
     }
 }

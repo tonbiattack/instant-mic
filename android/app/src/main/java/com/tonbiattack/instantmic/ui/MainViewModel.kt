@@ -1,21 +1,26 @@
 package com.tonbiattack.instantmic.ui
 
 import android.app.Application
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.data.SettingsRepository
 import com.tonbiattack.instantmic.domain.CommandParser
-import com.tonbiattack.instantmic.domain.KeyAction
+import com.tonbiattack.instantmic.domain.CustomCommand
+import com.tonbiattack.instantmic.domain.CustomCommands
+import com.tonbiattack.instantmic.domain.KeyCommand
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.DeliveryResult
 import com.tonbiattack.instantmic.net.PairingClient
 import com.tonbiattack.instantmic.net.PairingException
 import com.tonbiattack.instantmic.net.RemoteClient
 import com.tonbiattack.instantmic.protocol.DeviceIds
+import com.tonbiattack.instantmic.speech.HapticCue
+import com.tonbiattack.instantmic.speech.Haptics
 import com.tonbiattack.instantmic.speech.RecognizerCapability
 import com.tonbiattack.instantmic.speech.SpeechRecognizerController
 import com.tonbiattack.instantmic.speech.SpeechState
+import com.tonbiattack.instantmic.speech.isActive
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,10 +34,17 @@ sealed interface LastAction {
     data object None : LastAction
     data class Sending(val preview: String) : LastAction
     data class Typed(val preview: String, val elapsedMs: Long) : LastAction
-    data class KeySent(val action: KeyAction, val elapsedMs: Long) : LastAction
+    data class KeySent(
+        val command: KeyCommand,
+        val elapsedMs: Long,
+        val raw: String = "",
+    ) : LastAction
     data class Duplicate(val preview: String) : LastAction
     data class Failed(val preview: String, val message: String) : LastAction
     data class NoCommand(val preview: String) : LastAction
+
+    /** The phrase used the wake prefix but no command matched. */
+    data class UnknownCommand(val preview: String, val raw: String) : LastAction
 }
 
 data class UiState(
@@ -42,23 +54,30 @@ data class UiState(
     val capability: RecognizerCapability = RecognizerCapability(false, false, false),
     val lastAction: LastAction = LastAction.None,
     val lastText: String = "",
+    val lastTranscript: String = "",
     val busy: Boolean = false,
     val pairingInProgress: Boolean = false,
     val pairingError: String? = null,
     val microphoneGranted: Boolean = false,
+    val customCommands: List<CustomCommand> = emptyList(),
+    val continuousListening: Boolean = true,
+    val hapticsEnabled: Boolean = true,
+    val hapticsAvailable: Boolean = false,
+    val commandEditorError: String? = null,
 ) {
-    val commandHint: String get() = "「コマンド、送信」でEnter / 「コマンド、改行」でShift+Enter"
+    val commandHint: String
+        get() = "「コマンド、送信」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SettingsRepository(app)
-    private val speech = SpeechRecognizerController(app)
+    private val speech = SpeechRecognizerController(app, viewModelScope)
     private val remote = RemoteClient(viewModelScope)
     private val pairingClient = PairingClient()
+    private val haptics = Haptics(app)
 
-    private val _ui = MutableStateFlow(UiState())
-
+    private val _ui = MutableStateFlow(UiState(hapticsAvailable = haptics.supported))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     init {
@@ -68,7 +87,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.value = _ui.value.copy(
                     pairing = stored.pairing,
                     lastText = stored.lastText,
+                    customCommands = stored.customCommands,
+                    continuousListening = stored.continuousListening,
+                    hapticsEnabled = stored.hapticsEnabled,
                 )
+                speech.setContinuous(stored.continuousListening)
                 if (stored.pairing != null && remote.state.value is ConnectionState.Disconnected) {
                     remote.start(stored.pairing)
                 }
@@ -82,15 +105,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             speech.state.collect { state ->
                 _ui.value = _ui.value.copy(speech = state)
-                if (state is SpeechState.Result) {
-                    handleTranscript(state.text)
-                }
+            }
+        }
+        viewModelScope.launch {
+            speech.results.collect { transcript ->
+                _ui.value = _ui.value.copy(lastTranscript = transcript.text)
+                handleTranscript(transcript.text)
+            }
+        }
+        viewModelScope.launch {
+            speech.cues.collect { cue ->
+                haptics.play(cue, _ui.value.hapticsEnabled)
             }
         }
     }
 
     fun refreshCapability() {
-        _ui.value = _ui.value.copy(capability = speech.capability())
+        _ui.value = _ui.value.copy(
+            capability = speech.capability(),
+            hapticsAvailable = haptics.supported,
+        )
     }
 
     fun setMicrophoneGranted(granted: Boolean) {
@@ -99,8 +133,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** One tap on the microphone button: start or stop listening. */
     fun toggleListening() {
-        val state = speech.state.value
-        if (state is SpeechState.Listening || state is SpeechState.Processing) {
+        if (speech.state.value.isActive) {
             speech.stop()
             return
         }
@@ -111,42 +144,83 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _ui.value = _ui.value.copy(lastAction = LastAction.None)
-        speech.start(languageTag = "ja-JP", preferOnDevice = true)
+        speech.start(continuous = _ui.value.continuousListening, languageTag = "ja-JP", preferOnDevice = true)
+    }
+
+    /** Explicit stop, also used when the activity goes to the background. */
+    fun stopListening() {
+        speech.cancel()
     }
 
     fun cancelListening() {
         speech.cancel()
-        speech.release()
     }
 
     fun dismissAction() {
         _ui.value = _ui.value.copy(lastAction = LastAction.None)
-        if (speech.state.value is SpeechState.Failed || speech.state.value is SpeechState.Result) {
-            speech.release()
-            _ui.value = _ui.value.copy(speech = SpeechState.Idle)
+        if (speech.state.value is SpeechState.Failed) {
+            speech.cancel()
         }
+    }
+
+    fun setContinuousListening(enabled: Boolean) {
+        _ui.value = _ui.value.copy(continuousListening = enabled)
+        viewModelScope.launch { settings.setContinuousListening(enabled) }
+        speech.setContinuous(enabled)
+    }
+
+    fun setHapticsEnabled(enabled: Boolean) {
+        _ui.value = _ui.value.copy(hapticsEnabled = enabled)
+        viewModelScope.launch { settings.setHapticsEnabled(enabled) }
+    }
+
+    fun saveCustomCommand(phrase: String, sequence: String, editing: String?): Boolean {
+        val errors = CustomCommands.validate(phrase, sequence, _ui.value.customCommands, editing)
+        if (errors.isNotEmpty()) {
+            _ui.value = _ui.value.copy(commandEditorError = errors.first())
+            return false
+        }
+        val updated = CustomCommands.upsert(_ui.value.customCommands, phrase, sequence, editing)
+        _ui.value = _ui.value.copy(customCommands = updated, commandEditorError = null)
+        viewModelScope.launch { settings.saveCustomCommands(updated) }
+        return true
+    }
+
+    fun deleteCustomCommand(phrase: String) {
+        val updated = CustomCommands.remove(_ui.value.customCommands, phrase)
+        _ui.value = _ui.value.copy(customCommands = updated)
+        viewModelScope.launch { settings.saveCustomCommands(updated) }
+    }
+
+    fun clearCommandEditorError() {
+        _ui.value = _ui.value.copy(commandEditorError = null)
     }
 
     /**
      * Routes a finalized transcript.
      *
      * Exactly one outcome happens: a key action, a text insertion, or nothing.
-     * Interim results never reach here because the recognizer ignores them.
+     * Interim results never reach here because the recognizer ignores them and
+     * only reports a session once.
      */
     private fun handleTranscript(transcript: String) {
-        val prefix = _ui.value.pairing?.commandPrefix ?: CommandParser.DEFAULT_PREFIX
-        when (val result = CommandParser.interpret(transcript, prefix)) {
+        val state = _ui.value
+        val prefix = state.pairing?.commandPrefix ?: CommandParser.DEFAULT_PREFIX
+        when (val result = CommandParser.interpret(transcript, prefix, state.customCommands)) {
             CommandParser.Result.Empty -> {
                 _ui.value = _ui.value.copy(lastAction = LastAction.NoCommand(transcript))
             }
 
             is CommandParser.Result.Text -> sendText(result.text)
 
-            is CommandParser.Result.Key -> sendKey(result.action, transcript)
+            is CommandParser.Result.Key -> sendKey(result.command, transcript)
 
             is CommandParser.Result.UnknownCommand -> {
                 _ui.value = _ui.value.copy(
-                    lastAction = LastAction.Failed(transcript, "未対応のコマンドです。キー操作は行いませんでした。"),
+                    lastAction = LastAction.UnknownCommand(
+                        preview = transcript,
+                        raw = result.raw,
+                    ),
                 )
             }
         }
@@ -167,14 +241,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun sendKey(action: KeyAction, transcript: String) {
+    private fun sendKey(command: KeyCommand, transcript: String) {
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(transcript), busy = true)
         viewModelScope.launch {
-            val result = remote.sendKey(action.wire)
+            val result = remote.sendKey(command.wire, count = command.count)
             _ui.value = _ui.value.copy(
                 busy = false,
                 lastAction = if (result.ok || result.duplicate) {
-                    LastAction.KeySent(action, result.elapsedMs)
+                    LastAction.KeySent(command, result.elapsedMs, transcript)
                 } else {
                     LastAction.Failed(transcript, result.error ?: "キー操作に失敗しました")
                 },
@@ -259,7 +333,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             remote.stop()
             settings.clearPairing()
-            speech.release()
+            speech.stop()
             _ui.value = _ui.value.copy(
                 lastAction = LastAction.None,
                 speech = SpeechState.Idle,

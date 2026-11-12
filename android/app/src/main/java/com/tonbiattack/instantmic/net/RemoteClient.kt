@@ -153,9 +153,17 @@ class RemoteClient(
     suspend fun sendText(text: String, operationId: String = OperationIds.next()): DeliveryResult =
         send(TextMessage(operationId, text).toJson(), operationId)
 
-    /** Sends a fixed key action. Returns the receiver's acknowledgment. */
-    suspend fun sendKey(wireName: String, operationId: String = OperationIds.next()): DeliveryResult =
-        send(KeyMessage(operationId, wireName).toJson(), operationId)
+    /** Sends a fixed key sequence. Returns the receiver's acknowledgment. */
+    suspend fun sendKey(
+        wireName: String,
+        count: Int = 1,
+        operationId: String = OperationIds.next(),
+    ): DeliveryResult {
+        if (count > 1) {
+            return send(KeyMessage(operationId, wireName, count).toJson(), operationId)
+        }
+        return send(KeyMessage(operationId, wireName).toJson(), operationId)
+    }
 
     private suspend fun send(payload: String, id: String): DeliveryResult {
         val ws = socket ?: return DeliveryResult(id, false, false, "未接続です", null, 0)
