@@ -24,11 +24,12 @@ const (
 	keyeventfKeyUp    = 0x0002
 	keyeventfUnicode  = 0x0004
 
-	vkShift   = 0x10
-	vkControl = 0x11
-	vkMenu    = 0x12
-	vkLWin    = 0x5B
-	vkReturn  = 0x0D
+	vkShift     = 0x10
+	vkControl   = 0x11
+	vkMenu      = 0x12
+	vkLWin      = 0x5B
+	vkReturn    = 0x0D
+	vkBackspace = 0x08
 
 	processQueryLimitedInformation = 0x1000
 )
@@ -209,6 +210,47 @@ func (w *WindowsInserter) checkTarget() error {
 	}
 	if st.Elevated {
 		return ErrElevatedTarget
+	}
+	return nil
+}
+
+// MaxEraseCount bounds one spoken undo. It matches the text length limit so an
+// undo can always cover a single insertion.
+const MaxEraseCount = 4000
+
+// EraseText deletes count characters before the caret.
+//
+// Backspace is sent in batches rather than one SendInput per character: a
+// 1000-character undo would otherwise build 2000 events. The count is validated
+// by the caller against the receiver's own undo record.
+func (w *WindowsInserter) EraseText(count int) error {
+	if count <= 0 {
+		return errors.New("nothing to erase")
+	}
+	if count > MaxEraseCount {
+		return fmt.Errorf("erase count %d is too large", count)
+	}
+	if err := w.checkTarget(); err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	events := make([]inputUnion, 0, count*2)
+	for i := 0; i < count; i++ {
+		events = append(events, keyDown(vkBackspace, false), keyUp(vkBackspace, false))
+	}
+	// Keep each SendInput call reasonably small; some applications drop input
+	// when a single batch is very large.
+	const batch = 64
+	for start := 0; start < len(events); start += batch * 2 {
+		end := start + batch*2
+		if end > len(events) {
+			end = len(events)
+		}
+		if err := sendInputs(events[start:end]); err != nil {
+			return err
+		}
 	}
 	return nil
 }

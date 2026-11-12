@@ -21,12 +21,14 @@ import (
 )
 
 type fakeInserter struct {
-	mu       sync.Mutex
-	texts    []string
-	keys     []keyPress
-	status   input.Status
-	failText error
-	failKey  error
+	mu        sync.Mutex
+	texts     []string
+	keys      []keyPress
+	erased    []int
+	status    input.Status
+	failText  error
+	failKey   error
+	failErase error
 }
 
 type keyPress struct {
@@ -61,6 +63,25 @@ func (f *fakeInserter) PressKey(seq speech.Sequence, count int) error {
 }
 
 func (f *fakeInserter) Status() input.Status { return f.status }
+
+func (f *fakeInserter) EraseText(count int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.status.HasFocus {
+		return input.ErrNoFocus
+	}
+	if f.failErase != nil {
+		return f.failErase
+	}
+	f.erased = append(f.erased, count)
+	return nil
+}
+
+func (f *fakeInserter) erasedCounts() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.erased...)
+}
 
 func (f *fakeInserter) snapshot() ([]string, []keyPress) {
 	f.mu.Lock()
@@ -382,6 +403,131 @@ func TestPairingQRIsUnavailableWhenClosed(t *testing.T) {
 	env.srv.CancelPairing()
 	if _, ok := env.srv.PairingQR(); ok {
 		t.Fatal("QR available after cancel")
+	}
+}
+
+func TestSpokenUndoRemovesLastInsertion(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "undo-1", Text: "こんにちは"})
+	if ack := readAck(t, ws); !ack.OK {
+		t.Fatalf("ack = %+v", ack)
+	}
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "undo-2", Text: "コマンド、言い直し"})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "erase" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	if got := env.ins.erasedCounts(); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("erased = %v, want [5]", got)
+	}
+	texts, _ := env.ins.snapshot()
+	if len(texts) != 1 {
+		t.Fatalf("undo was typed as text: %v", texts)
+	}
+}
+
+func TestUndoIsSingleUse(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "u1", Text: "abc"})
+	readAck(t, ws)
+	for i, id := range []string{"u2", "u3"} {
+		_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: id, Text: "コマンド、言い直し"})
+		ack := readAck(t, ws)
+		if i == 0 && (!ack.OK || ack.Applied != "erase") {
+			t.Fatalf("first undo = %+v", ack)
+		}
+		if i == 1 && (ack.OK || ack.Error == "") {
+			t.Fatalf("second undo should fail: %+v", ack)
+		}
+	}
+	if got := env.ins.erasedCounts(); len(got) != 1 {
+		t.Fatalf("erased %d times, want 1: %v", len(got), got)
+	}
+}
+
+func TestUndoAfterKeyActionIsRefused(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "k1", Text: "abc"})
+	readAck(t, ws)
+	_ = ws.WriteJSON(protocol.Key{Type: protocol.TypeKey, ID: "k2", Key: "enter"})
+	readAck(t, ws)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "k3", Text: "コマンド、言い直し"})
+	ack := readAck(t, ws)
+	if ack.OK {
+		t.Fatalf("undo after Enter should be refused: %+v", ack)
+	}
+	if got := env.ins.erasedCounts(); len(got) != 0 {
+		t.Fatalf("erased despite a key action: %v", got)
+	}
+}
+
+func TestEraseMessageCountMustMatch(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "e1", Text: "hello"})
+	readAck(t, ws)
+
+	// A count that does not match the receiver's own record is refused.
+	_ = ws.WriteJSON(protocol.Erase{Type: protocol.TypeErase, ID: "e2", Count: 2})
+	ack := readAck(t, ws)
+	if ack.OK {
+		t.Fatalf("mismatched erase should fail: %+v", ack)
+	}
+	// The correct count still works afterwards.
+	_ = ws.WriteJSON(protocol.Erase{Type: protocol.TypeErase, ID: "e3", Count: 5})
+	ack = readAck(t, ws)
+	if !ack.OK || ack.Applied != "erase" {
+		t.Fatalf("matching erase = %+v", ack)
+	}
+	if got := env.ins.erasedCounts(); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("erased = %v, want [5]", got)
+	}
+}
+
+func TestEraseWithoutInsertionFails(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	_ = ws.WriteJSON(protocol.Erase{Type: protocol.TypeErase, ID: "n1", Count: 1})
+	ack := readAck(t, ws)
+	if ack.OK || ack.Error == "" {
+		t.Fatalf("erase with nothing to undo = %+v", ack)
+	}
+	if got := env.ins.erasedCounts(); len(got) != 0 {
+		t.Fatalf("erased without insertion: %v", got)
+	}
+}
+
+func TestEraseRejectsOutOfRangeCount(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	for i, count := range []int{0, -1, 100000} {
+		id := "bad-erase-" + string(rune('a'+i))
+		_ = ws.WriteJSON(protocol.Erase{Type: protocol.TypeErase, ID: id, Count: count})
+		_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var e protocol.Error
+		if err := ws.ReadJSON(&e); err != nil {
+			t.Fatalf("count %d: %v", count, err)
+		}
+		if e.Code != "bad_erase" {
+			t.Fatalf("count %d: error = %+v", count, e)
+		}
 	}
 }
 

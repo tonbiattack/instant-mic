@@ -93,6 +93,16 @@ class CommandParserTest {
     }
 
     @Test
+    fun `spoken undo is a whole-phrase command`() {
+        for (input in listOf("コマンド、言い直し", "コマンド言い直し", "コマンド 言い直し", "コマンド、言直し")) {
+            assertTrue("$input", interpret(input) is CommandParser.Result.Erase)
+        }
+        for (input in listOf("言い直しします", "コマンド言い直しについて説明して")) {
+            assertTrue("$input", interpret(input) is CommandParser.Result.Text)
+        }
+    }
+
+    @Test
     fun `repeat count is honoured only for repeatable commands`() {
         val cases = mapOf(
             "コマンド、3回削除" to (3 to "backspace"),
@@ -141,6 +151,13 @@ class CommandParserTest {
         assertEquals("backspace", (result as CommandParser.Result.Key).command.wire)
         assertTrue(
             CustomCommands.validate("削除", "ctrl+c", emptyList()).isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun `undo phrase cannot be registered as a custom command`() {
+        assertTrue(
+            CustomCommands.validate("言い直し", "ctrl+c", emptyList()).isNotEmpty(),
         )
     }
 

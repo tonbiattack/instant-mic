@@ -14,6 +14,7 @@ object Wire {
     const val TYPE_READY = "ready"
     const val TYPE_TEXT = "text"
     const val TYPE_KEY = "key"
+    const val TYPE_ERASE = "erase"
     const val TYPE_PING = "ping"
     const val TYPE_PONG = "pong"
     const val TYPE_ACK = "ack"
@@ -72,6 +73,15 @@ data class KeyMessage(val id: String, val key: String, val count: Int = 1) {
         put("id", id)
         put("key", key)
         if (count > 1) put("count", count)
+    }.toString()
+}
+
+/** Asks the receiver to remove the last text insertion. */
+data class EraseMessage(val id: String, val count: Int) {
+    fun toJson(): String = JSONObject().apply {
+        put("type", Wire.TYPE_ERASE)
+        put("id", id)
+        put("count", count)
     }.toString()
 }
 

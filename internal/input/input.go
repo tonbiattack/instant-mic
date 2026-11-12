@@ -29,6 +29,10 @@ type Status struct {
 type Inserter interface {
 	// InsertText types text into the currently focused window.
 	InsertText(text string) error
+	// EraseText deletes count characters immediately before the caret by
+	// sending Backspace that many times. The receiver validates the count
+	// against its own undo record before calling this.
+	EraseText(count int) error
 	// PressKey performs a validated key sequence count times. The receiver
 	// validates the sequence before this call, so implementations can assume it
 	// only contains allowlisted keys.

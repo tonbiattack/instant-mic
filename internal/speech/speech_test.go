@@ -132,6 +132,30 @@ func TestInterpretFullWidth(t *testing.T) {
 	}
 }
 
+func TestInterpretErase(t *testing.T) {
+	for _, in := range []string{
+		"コマンド、言い直し",
+		"コマンド言い直し",
+		"コマンド 言い直し",
+		"コマンド、言直し",
+		"コマンド、言い直し。",
+	} {
+		if got := Interpret(in); got.Kind != KindErase {
+			t.Errorf("Interpret(%q).Kind = %v, want KindErase", in, got.Kind)
+		}
+	}
+	// The wake word inside a normal sentence must stay text.
+	for _, in := range []string{
+		"言い直しします",
+		"コマンド言い直しについて説明して",
+		"もう一度言い直し",
+	} {
+		if got := Interpret(in); got.Kind != KindText {
+			t.Errorf("Interpret(%q).Kind = %v, want KindText", in, got.Kind)
+		}
+	}
+}
+
 func TestNormalizeFoldsVariants(t *testing.T) {
 	pairs := [][2]string{
 		{"送信", "送信"},

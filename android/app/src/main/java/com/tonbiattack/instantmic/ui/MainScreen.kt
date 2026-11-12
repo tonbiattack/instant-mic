@@ -56,6 +56,7 @@ import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeySequence
+import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.speech.SpeechState
 import com.tonbiattack.instantmic.speech.isActive
@@ -130,6 +131,7 @@ fun MainScreen(
                     onClearError = viewModel::clearCommandEditorError,
                     onContinuousChange = viewModel::setContinuousListening,
                     onHapticsChange = viewModel::setHapticsEnabled,
+                    onAutoStartChange = viewModel::setAutoStartListening,
                 )
             } else {
                 val repair = state.needsRepair
@@ -407,6 +409,16 @@ private fun MicrophonePanel(
     }
 }
 
+/** Shows the recognized text, and the shaped result when punctuation changed. */
+private fun transcriptLine(transcript: String, action: LastAction): String {
+    val shaped = TextShaper.shape(transcript)
+    val shown = transcript.take(60)
+    if (action is LastAction.Typed && shaped != transcript) {
+        return "認識: $shown → 送信: ${shaped.take(60)}"
+    }
+    return "認識: $shown"
+}
+
 @Composable
 private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
     val action = state.lastAction
@@ -420,6 +432,7 @@ private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
             "実行: ${action.command.label}$count（${action.elapsedMs}ms）" to false
         }
         is LastAction.Duplicate -> "送信済みです（二重実行を防止）: ${action.preview}" to false
+        is LastAction.Erased -> "言い直し: 直前の${action.count}文字を取り消しました（${action.elapsedMs}ms）" to false
         is LastAction.Failed -> "失敗: ${action.message}" to true
         is LastAction.NoCommand -> "音声が空でした。もう一度話してください。" to true
         is LastAction.UnknownCommand ->
@@ -444,7 +457,7 @@ private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
             }
             if (state.lastTranscript.isNotEmpty()) {
                 Text(
-                    "認識: ${state.lastTranscript.take(60)}",
+                    transcriptLine(state.lastTranscript, action),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -480,6 +493,7 @@ private fun CommandsPanel(
     onClearError: () -> Unit,
     onContinuousChange: (Boolean) -> Unit,
     onHapticsChange: (Boolean) -> Unit,
+    onAutoStartChange: (Boolean) -> Unit,
 ) {
     // The editor state lives here so a list row can load itself into the fields.
     var phrase by rememberSaveable { mutableStateOf("") }
@@ -504,6 +518,12 @@ private fun CommandsPanel(
             checked = state.hapticsEnabled,
             onChange = onHapticsChange,
             enabled = state.hapticsAvailable,
+        )
+        SettingSwitch(
+            title = "起動したらすぐ話す",
+            description = "アプリを開いた時点で聞き取りを始めます。Quick Settings のタイルからも開始できます。",
+            checked = state.autoStartListening,
+            onChange = onAutoStartChange,
         )
 
         Spacer(Modifier.height(4.dp))

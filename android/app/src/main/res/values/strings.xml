@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">instant-mic</string>
+    <string name="tile_label">音声入力</string>
+    <string name="tile_subtitle">instant-mic</string>
 </resources>

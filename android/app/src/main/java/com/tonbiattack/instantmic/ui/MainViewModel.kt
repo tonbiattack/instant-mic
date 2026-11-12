@@ -48,6 +48,9 @@ sealed interface LastAction {
     data class Failed(val preview: String, val message: String) : LastAction
     data class NoCommand(val preview: String) : LastAction
 
+    /** The last insertion was removed by "言い直し". */
+    data class Erased(val count: Int, val elapsedMs: Long) : LastAction
+
     /** The phrase used the wake prefix but no command matched. */
     data class UnknownCommand(val preview: String, val raw: String) : LastAction
 }
@@ -68,6 +71,7 @@ data class UiState(
     val continuousListening: Boolean = true,
     val hapticsEnabled: Boolean = true,
     val hapticsAvailable: Boolean = false,
+    val autoStartListening: Boolean = false,
     val commandEditorError: String? = null,
     val discovery: DiscoveryState = DiscoveryState.Off,
     val needsRepair: String? = null,
@@ -113,6 +117,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     customCommands = stored.customCommands,
                     continuousListening = stored.continuousListening,
                     hapticsEnabled = stored.hapticsEnabled,
+                    autoStartListening = stored.autoStartListening,
                 )
                 speech.setContinuous(stored.continuousListening)
                 val pairing = stored.pairing ?: return@collectLatest
@@ -167,6 +172,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(microphoneGranted = granted)
     }
 
+    /** True when the user asked the app to start listening on launch. */
+    fun shouldAutoStart(): Boolean = _ui.value.autoStartListening
+
+    /** True when a tap may start the microphone right now. */
+    fun canStartListening(): Boolean = _ui.value.microphoneGranted && !speech.state.value.isActive
+
     /** One tap on the microphone button: start or stop listening. */
     fun toggleListening() {
         if (speech.state.value.isActive) {
@@ -208,6 +219,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setHapticsEnabled(enabled: Boolean) {
         _ui.value = _ui.value.copy(hapticsEnabled = enabled)
         viewModelScope.launch { settings.setHapticsEnabled(enabled) }
+    }
+
+    fun setAutoStartListening(enabled: Boolean) {
+        _ui.value = _ui.value.copy(autoStartListening = enabled)
+        viewModelScope.launch { settings.setAutoStartListening(enabled) }
     }
 
     // ---- pairing / reconnection -------------------------------------------
@@ -381,6 +397,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             is CommandParser.Result.Key -> sendKey(result.command, transcript)
 
+            is CommandParser.Result.Erase -> sendErase()
+
             is CommandParser.Result.UnknownCommand -> {
                 _ui.value = _ui.value.copy(
                     lastAction = LastAction.UnknownCommand(
@@ -411,9 +429,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(transcript), busy = true)
         viewModelScope.launch {
             val result = remote.sendKey(command.wire, count = command.count)
+            val ok = result.ok || result.duplicate
+            if (ok) {
+                // A key action moves the caret or edits text, so the previous
+                // insertion can no longer be undone.
+                settings.saveLastText("")
+            }
             _ui.value = _ui.value.copy(
                 busy = false,
-                lastAction = if (result.ok || result.duplicate) {
+                lastText = if (ok) "" else _ui.value.lastText,
+                lastAction = if (ok) {
                     LastAction.KeySent(command, result.elapsedMs, transcript)
                 } else {
                     LastAction.Failed(transcript, result.error ?: "キー操作に失敗しました")
@@ -426,6 +451,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         result.duplicate -> LastAction.Duplicate(preview)
         result.ok -> LastAction.Typed(preview, result.elapsedMs)
         else -> LastAction.Failed(preview, result.error ?: "送信に失敗しました")
+    }
+
+    /**
+     * Asks the receiver to undo the last insertion.
+     *
+     * The phone only knows the text it just sent, and the receiver validates the
+     * count against its own record, so a key command or another client in
+     * between makes the erase fail instead of deleting the wrong amount.
+     */
+    private fun sendErase() {
+        val last = _ui.value.lastText
+        if (last.isEmpty()) {
+            _ui.value = _ui.value.copy(
+                lastAction = LastAction.Failed(
+                    "言い直し",
+                    "取り消せる入力がありません",
+                ),
+            )
+            return
+        }
+        val count = last.codePointCount(0, last.length)
+        _ui.value = _ui.value.copy(lastAction = LastAction.Sending("言い直し"), busy = true)
+        viewModelScope.launch {
+            val result = remote.sendErase(count)
+            if (result.ok || result.duplicate) {
+                // The text is gone, so it must not be undone twice.
+                settings.saveLastText("")
+                _ui.value = _ui.value.copy(
+                    busy = false,
+                    lastText = "",
+                    lastAction = LastAction.Erased(count, result.elapsedMs),
+                )
+            } else {
+                _ui.value = _ui.value.copy(
+                    busy = false,
+                    lastAction = LastAction.Failed(
+                        "言い直し",
+                        result.error ?: "取り消しに失敗しました",
+                    ),
+                )
+            }
+        }
     }
 
     /** Manual reconnect: also re-runs discovery, so a changed IP is handled. */

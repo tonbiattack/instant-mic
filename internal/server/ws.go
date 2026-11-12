@@ -59,6 +59,9 @@ type conn struct {
 
 	writeMu sync.Mutex
 	closed  bool
+
+	// undo tracks this phone's last text insertion for "言い直し".
+	undo *undo
 }
 
 func jsonUnmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
@@ -108,7 +111,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(maxMessageSize)
 	_ = ws.SetReadDeadline(time.Now().Add(authWait))
 
-	c := &conn{srv: s, ws: ws}
+	c := &conn{srv: s, ws: ws, undo: newUndo()}
 	ready, err := c.authenticate(s)
 	if err != nil {
 		s.noteFailure(host)
@@ -206,6 +209,8 @@ func (c *conn) handleMessage(data []byte) {
 		c.handleText(data)
 	case protocol.TypeKey:
 		c.handleKey(data)
+	case protocol.TypeErase:
+		c.handleErase(data)
 	case protocol.TypePing:
 		c.handlePing(data)
 	case "":
@@ -241,13 +246,89 @@ func (c *conn) handleText(data []byte) {
 
 	result := speech.Interpret(msg.Text)
 	start := time.Now()
-	res := c.srv.apply(result)
+	var res AckResult
+	if result.Kind == speech.KindErase {
+		// A spoken "言い直し" arrives as text, so it uses the same undo record
+		// as an explicit erase message.
+		res = c.applyErase()
+	} else {
+		res = c.srv.apply(result)
+	}
 	elapsed := time.Since(start).Milliseconds()
+
+	// A successful literal insertion is the only thing "言い直し" may remove.
+	// Anything else changes the target in ways the receiver cannot measure.
+	if res.OK && result.Kind == speech.KindText {
+		c.undo.recordText(len([]rune(result.Text)))
+	} else if res.OK {
+		c.undo.invalidate()
+	}
 
 	c.srv.dedupe.Store(msg.ID, res)
 	if !res.OK {
 		c.srv.emit("warn", "入力に失敗: "+res.Error)
 	}
+	c.replyFrom(msg.ID, res, elapsed)
+}
+
+// applyErase removes the last text insertion, if one is pending.
+func (c *conn) applyErase() AckResult {
+	pending, ok := c.undo.take()
+	if !ok {
+		return AckResult{OK: false, Error: "取り消せる入力がありません"}
+	}
+	if err := c.srv.inserter.EraseText(pending); err != nil {
+		// The text is still there, so keep the record for a retry.
+		c.undo.recordText(pending)
+		return AckResult{OK: false, Error: humanInputError(err)}
+	}
+	return AckResult{OK: true, Applied: "erase"}
+}
+
+// handleErase removes the most recent text insertion.
+//
+// The phone sends the count it believes was typed, but the receiver decides:
+// a mismatch, a missing record or a count beyond the limit is refused rather
+// than deleting an unknown amount of the user's document.
+func (c *conn) handleErase(data []byte) {
+	msg, err := protocol.DecodeErase(data)
+	if err != nil {
+		_ = c.send(protocol.Error{Type: protocol.TypeError, Code: "bad_erase", Message: err.Error()})
+		return
+	}
+	if res, ok := c.srv.dedupe.Lookup(msg.ID); ok {
+		c.replyFrom(msg.ID, res, 0)
+		return
+	}
+
+	pending, ok := c.undo.take()
+	if !ok {
+		res := AckResult{OK: false, Error: "取り消せる入力がありません"}
+		c.srv.dedupe.Store(msg.ID, res)
+		c.replyFrom(msg.ID, res, 0)
+		return
+	}
+	if msg.Count != pending {
+		// Put the record back: the phone asked to delete a different amount, so
+		// nothing is deleted and a corrected request can still match.
+		c.undo.recordText(pending)
+		res := AckResult{OK: false, Error: "直前の入力と一致しないため取り消しません"}
+		c.srv.dedupe.Store(msg.ID, res)
+		c.replyFrom(msg.ID, res, 0)
+		return
+	}
+
+	start := time.Now()
+	err = c.srv.inserter.EraseText(pending)
+	elapsed := time.Since(start).Milliseconds()
+	res := AckResult{OK: err == nil, Applied: "erase"}
+	if err != nil {
+		// The text is still there, so keep the record for a retry.
+		c.undo.recordText(pending)
+		res.Error = humanInputError(err)
+		c.srv.emit("warn", "取り消しに失敗: "+res.Error)
+	}
+	c.srv.dedupe.Store(msg.ID, res)
 	c.replyFrom(msg.ID, res, elapsed)
 }
 
@@ -273,6 +354,9 @@ func (c *conn) handleKey(data []byte) {
 	}
 	start := time.Now()
 	err = c.srv.inserter.PressKey(seq, count)
+	// A key action moves the caret or edits text in an app-specific way, so the
+	// previous insertion can no longer be undone safely.
+	c.undo.invalidate()
 	res := AckResult{OK: err == nil, Applied: seq.String()}
 	if err != nil {
 		res.Error = humanInputError(err)
@@ -320,6 +404,8 @@ func (s *Server) apply(result speech.Result) AckResult {
 		return AckResult{OK: false, Error: "空の音声結果です"}
 	case speech.KindUnknownCommand:
 		return AckResult{OK: false, Error: "未対応のコマンドです: " + result.Raw}
+	case speech.KindErase:
+		return AckResult{OK: false, Error: "取り消す入力がありません"}
 	case speech.KindKey:
 		if err := s.inserter.PressKey(result.Key, result.Count); err != nil {
 			return AckResult{OK: false, Error: humanInputError(err)}

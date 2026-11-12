@@ -14,6 +14,12 @@ object CommandParser {
     /** Maximum number of characters accepted by the receiver. */
     const val MAX_TEXT_LENGTH = 4000
 
+    /**
+     * Words that mean "undo the last insertion". They are matched as whole
+     * command words, exactly like the key commands.
+     */
+    private val ERASE_PHRASES = setOf("言い直し", "言直し").map(::normalize).toSet()
+
     private class Entry(
         val phrase: String,
         val command: KeyCommand,
@@ -53,7 +59,7 @@ object CommandParser {
     }
 
     /** Normalized built-in phrases, used to reject custom-command conflicts. */
-    fun builtinPhrases(): Set<String> = byPhrase.keys
+    fun builtinPhrases(): Set<String> = byPhrase.keys + ERASE_PHRASES
 
     sealed interface Result {
         /** Literal text to insert. */
@@ -61,6 +67,9 @@ object CommandParser {
 
         /** A key sequence to perform. */
         data class Key(val command: KeyCommand, val raw: String) : Result
+
+        /** Remove the last text insertion ("言い直し"). */
+        data class Erase(val raw: String) : Result
 
         /** The wake prefix was used with an unsupported word. Do nothing. */
         data class UnknownCommand(val raw: String) : Result
@@ -81,7 +90,7 @@ object CommandParser {
         // here, so a spoken separator can be told apart from a glued word.
         val light = java.text.Normalizer.normalize(trimmed, java.text.Normalizer.Form.NFKC).trim()
         val normPrefix = java.text.Normalizer.normalize(prefix, java.text.Normalizer.Form.NFKC)
-        if (!light.startsWith(normPrefix)) return Result.Text(trimmed)
+        if (!light.startsWith(normPrefix)) return Result.Text(TextShaper.shape(trimmed))
 
         var after = light.substring(normPrefix.length)
         var separated = false
@@ -91,11 +100,12 @@ object CommandParser {
         }
 
         val normRest = normalize(after)
+        if (normRest in ERASE_PHRASES) return Result.Erase(normPrefix + normRest)
         builtinResult(normRest)?.let { return it }
         customResult(normRest, custom)?.let { return it }
 
         return when {
-            !separated && normRest.isNotEmpty() -> Result.Text(trimmed)
+            !separated && normRest.isNotEmpty() -> Result.Text(TextShaper.shape(trimmed))
             else -> Result.UnknownCommand(normPrefix + normRest)
         }
     }
