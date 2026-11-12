@@ -74,6 +74,32 @@ func TestDecodeKey(t *testing.T) {
 	}
 }
 
+func TestDecodeErase(t *testing.T) {
+	good := `{"type":"erase","id":"op-1","count":5}`
+	msg, err := DecodeErase([]byte(good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Count != 5 {
+		t.Fatalf("count = %d", msg.Count)
+	}
+
+	bad := []string{
+		`{"type":"text","id":"op-1","count":5}`,
+		`{"type":"erase","count":5}`,
+		`{"type":"erase","id":"op-1"}`,
+		`{"type":"erase","id":"op-1","count":0}`,
+		`{"type":"erase","id":"op-1","count":-3}`,
+		`{"type":"erase","id":"op-1","count":4001}`,
+		`{"type":"erase","id":"bad id","count":1}`,
+	}
+	for _, s := range bad {
+		if _, err := DecodeErase([]byte(s)); err == nil {
+			t.Errorf("DecodeErase(%q) succeeded", s)
+		}
+	}
+}
+
 func TestValidID(t *testing.T) {
 	for _, id := range []string{"op-1", "ABC_123", "", "bad id", strings.Repeat("a", 65)} {
 		want := id != "" && !strings.ContainsAny(id, " ") && len(id) <= 64

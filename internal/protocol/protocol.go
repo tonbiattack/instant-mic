@@ -23,6 +23,7 @@ const (
 	TypeReady = "ready"
 	TypeText  = "text"
 	TypeKey   = "key"
+	TypeErase = "erase"
 	TypePing  = "ping"
 	TypePong  = "pong"
 	TypeAck   = "ack"
@@ -86,6 +87,18 @@ type Ping struct {
 	ID   string `json:"id"`
 	// SentAt is the client clock in milliseconds, echoed back in the pong.
 	SentAt int64 `json:"sentAt,omitempty"`
+}
+
+// Erase asks the receiver to remove the most recent text insertion.
+//
+// It is a separate message rather than a burst of Backspace key operations so
+// the receiver can verify the count, refuse when nothing was typed, and keep the
+// normal key allowlist (with its 5-step repeat cap) untouched.
+type Erase struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	// Count is the number of characters to delete, 1..MaxEraseCount.
+	Count int `json:"count"`
 }
 
 // Pong answers a ping.
@@ -162,6 +175,28 @@ func DecodeKey(data []byte) (Key, error) {
 		return m, errors.New("missing key")
 	}
 	if m.Count < 0 || m.Count > 5 {
+		return m, errors.New("count out of range")
+	}
+	return m, nil
+}
+
+// MaxEraseCount bounds a single undo so a malformed message cannot delete an
+// arbitrary amount of the user's text. It matches the text length limit.
+const MaxEraseCount = 4000
+
+// DecodeErase validates and decodes an erase message.
+func DecodeErase(data []byte) (Erase, error) {
+	var m Erase
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if m.Type != TypeErase {
+		return m, errors.New("not an erase message")
+	}
+	if !ValidID(m.ID) {
+		return m, errors.New("missing or invalid id")
+	}
+	if m.Count < 1 || m.Count > MaxEraseCount {
 		return m, errors.New("count out of range")
 	}
 	return m, nil

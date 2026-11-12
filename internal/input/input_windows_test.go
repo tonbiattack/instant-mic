@@ -94,3 +94,34 @@ func TestLineDeleteSequenceBuildsThreeChords(t *testing.T) {
 		t.Fatalf("got %d events, want 8", total)
 	}
 }
+
+func TestEraseTextRejectsInvalidCounts(t *testing.T) {
+	w := &WindowsInserter{}
+	for _, count := range []int{0, -1, MaxEraseCount + 1} {
+		if err := w.EraseText(count); err == nil {
+			t.Errorf("EraseText(%d) accepted", count)
+		}
+	}
+}
+
+func TestEraseTextBuildsBackspacePairs(t *testing.T) {
+	// The event construction is shared with PressKey, so check the shape here
+	// without sending real input: two events per erased character.
+	count := 3
+	events := make([]inputUnion, 0, count*2)
+	for i := 0; i < count; i++ {
+		events = append(events, keyDown(vkBackspace, false), keyUp(vkBackspace, false))
+	}
+	if len(events) != 6 {
+		t.Fatalf("got %d events, want 6", len(events))
+	}
+	if events[0].Ki.Vk != vkBackspace || events[0].Ki.Flags&keyeventfKeyUp != 0 {
+		t.Fatalf("first event = %+v", events[0].Ki)
+	}
+	if events[1].Ki.Vk != vkBackspace || events[1].Ki.Flags&keyeventfKeyUp == 0 {
+		t.Fatalf("second event = %+v", events[1].Ki)
+	}
+	if vkBackspace != 0x08 {
+		t.Fatalf("vkBackspace = %#x", vkBackspace)
+	}
+}

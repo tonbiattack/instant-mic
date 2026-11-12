@@ -4,6 +4,7 @@ import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.protocol.AckMessage
 import com.tonbiattack.instantmic.protocol.AuthMessage
 import com.tonbiattack.instantmic.protocol.ErrorMessage
+import com.tonbiattack.instantmic.protocol.EraseMessage
 import com.tonbiattack.instantmic.protocol.KeyMessage
 import com.tonbiattack.instantmic.protocol.OperationIds
 import com.tonbiattack.instantmic.protocol.PingMessage
@@ -164,6 +165,14 @@ class RemoteClient(
         }
         return send(KeyMessage(operationId, wireName).toJson(), operationId)
     }
+
+    /**
+     * Asks the receiver to remove the last text insertion. The receiver checks
+     * [count] against its own undo record, so a stale request cannot delete the
+     * wrong amount.
+     */
+    suspend fun sendErase(count: Int, operationId: String = OperationIds.next()): DeliveryResult =
+        send(EraseMessage(operationId, count).toJson(), operationId)
 
     private suspend fun send(payload: String, id: String): DeliveryResult {
         val ws = socket ?: return DeliveryResult(id, false, false, "未接続です", null, 0)

@@ -32,6 +32,7 @@ data class Settings(
     val customCommands: List<com.tonbiattack.instantmic.domain.CustomCommand> = emptyList(),
     val continuousListening: Boolean = true,
     val hapticsEnabled: Boolean = true,
+    val autoStartListening: Boolean = false,
 ) {
     companion object {
         val Empty = Settings(pairing = null, lastText = "")
@@ -54,6 +55,7 @@ class SettingsRepository(private val context: Context) {
         val customCommands = stringPreferencesKey("custom_commands")
         val continuousListening = stringPreferencesKey("continuous_listening")
         val haptics = stringPreferencesKey("haptics_enabled")
+        val autoStart = stringPreferencesKey("auto_start_listening")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -66,6 +68,7 @@ class SettingsRepository(private val context: Context) {
             customCommands = CustomCommands.decode(prefs[Keys.customCommands]),
             continuousListening = prefs[Keys.continuousListening]?.toBooleanStrictOrNull() ?: true,
             hapticsEnabled = prefs[Keys.haptics]?.toBooleanStrictOrNull() ?: true,
+            autoStartListening = prefs[Keys.autoStart]?.toBooleanStrictOrNull() ?: false,
         )
         if (token.isEmpty() || host.isEmpty()) {
             extras
@@ -114,6 +117,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHapticsEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.haptics] = enabled.toString() }
+    }
+
+    suspend fun setAutoStartListening(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.autoStart] = enabled.toString() }
     }
 
     suspend fun clearPairing() {

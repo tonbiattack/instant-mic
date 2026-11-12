@@ -279,6 +279,8 @@ const (
 	// command word. Nothing is typed and no key is pressed; the client shows an
 	// error so the user can retry.
 	KindUnknownCommand
+	// KindErase means the last text insertion should be removed.
+	KindErase
 	// KindEmpty means there is nothing to do.
 	KindEmpty
 )
@@ -346,6 +348,21 @@ func init() {
 	}
 }
 
+// erasePhrases are matched as whole command words, like the key commands. They
+// map to a protocol-level erase rather than to Backspace so the receiver can
+// validate the amount against its own record.
+var erasePhrases = map[string]struct{}{
+	"言い直し":   {},
+	"言直し":    {},
+	"取り消し入力": {},
+}
+
+// isErasePhrase reports whether the normalized command word means "undo".
+func isErasePhrase(normRest string) bool {
+	_, ok := erasePhrases[normRest]
+	return ok
+}
+
 // Normalize folds width, whitespace and punctuation so that variants produced
 // by speech recognition compare equal. It is used for command matching only;
 // literal text is sent unchanged except for trimming.
@@ -378,7 +395,7 @@ func Interpret(transcript string) Result {
 	// so we can tell a spoken separator from a command word glued to the prefix.
 	light := strings.TrimSpace(norm.NFKC.String(trimmed))
 	if !strings.HasPrefix(light, CommandPrefix) {
-		return Result{Kind: KindText, Text: trimmed}
+		return Result{Kind: KindText, Text: ShapeText(trimmed)}
 	}
 
 	after := light[len(CommandPrefix):]
@@ -399,6 +416,14 @@ func Interpret(transcript string) Result {
 			Key:   cmd.sequence,
 			Label: cmd.label,
 			Count: 1,
+			Raw:   CommandPrefix + normRest,
+		}
+	}
+
+	if isErasePhrase(normRest) {
+		return Result{
+			Kind:  KindErase,
+			Label: "言い直し",
 			Raw:   CommandPrefix + normRest,
 		}
 	}
@@ -424,7 +449,7 @@ func Interpret(transcript string) Result {
 
 	if !separated && normRest != "" {
 		// "コマンド一覧…" — the prefix is part of a normal word.
-		return Result{Kind: KindText, Text: trimmed}
+		return Result{Kind: KindText, Text: ShapeText(trimmed)}
 	}
 	// Bare wake word or unsupported command: never type or press.
 	return Result{Kind: KindUnknownCommand, Raw: CommandPrefix + normRest}
