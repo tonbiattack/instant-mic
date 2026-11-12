@@ -39,6 +39,25 @@ class PairingException(message: String, cause: Throwable? = null) : IOException(
  */
 class PairingClient {
 
+    /**
+     * Pairs using a scanned QR payload. The fingerprint from the QR is enforced
+     * during the TLS handshake, so a replayed or tampered code cannot redirect
+     * the pairing to another machine.
+     */
+    fun pairWithQR(
+        payload: com.tonbiattack.instantmic.protocol.PairingPayload,
+        deviceId: String,
+        deviceName: String,
+    ): PairingResult = pair(
+        host = payload.host,
+        port = payload.port,
+        code = "",
+        deviceId = deviceId,
+        deviceName = deviceName,
+        fingerprintHint = payload.fingerprint,
+        qrSecret = payload.secret,
+    )
+
     fun pair(
         host: String,
         port: Int,
@@ -46,6 +65,7 @@ class PairingClient {
         deviceId: String,
         deviceName: String,
         fingerprintHint: String? = null,
+        qrSecret: String? = null,
     ): PairingResult {
         val expected = fingerprintHint
             ?.let { Fingerprints.normalize(it) }
@@ -62,7 +82,7 @@ class PairingClient {
             .build()
 
         val payload = JSONObject().apply {
-            put("code", code.trim())
+            if (qrSecret != null) put("qrSecret", qrSecret) else put("code", code.trim())
             put("deviceId", deviceId)
             put("deviceName", deviceName)
         }.toString()

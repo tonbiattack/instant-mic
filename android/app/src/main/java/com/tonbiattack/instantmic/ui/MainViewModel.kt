@@ -7,12 +7,17 @@ import com.tonbiattack.instantmic.domain.CommandParser
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeyCommand
+import com.tonbiattack.instantmic.net.ConnectionPlanner
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.DeliveryResult
+import com.tonbiattack.instantmic.net.DiscoveryClient
+import com.tonbiattack.instantmic.net.DiscoveredReceiver
 import com.tonbiattack.instantmic.net.PairingClient
 import com.tonbiattack.instantmic.net.PairingException
+import com.tonbiattack.instantmic.net.ReconnectPolicy
 import com.tonbiattack.instantmic.net.RemoteClient
 import com.tonbiattack.instantmic.protocol.DeviceIds
+import com.tonbiattack.instantmic.protocol.PairingPayload
 import com.tonbiattack.instantmic.speech.HapticCue
 import com.tonbiattack.instantmic.speech.Haptics
 import com.tonbiattack.instantmic.speech.RecognizerCapability
@@ -64,9 +69,15 @@ data class UiState(
     val hapticsEnabled: Boolean = true,
     val hapticsAvailable: Boolean = false,
     val commandEditorError: String? = null,
+    val discovery: DiscoveryState = DiscoveryState.Off,
+    val needsRepair: String? = null,
+    val qrScanInProgress: Boolean = false,
 ) {
     val commandHint: String
         get() = "「コマンド、送信」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
+
+    /** True when a stored pairing exists and reconnecting on its own is unsafe. */
+    val repairRequired: Boolean get() = needsRepair != null
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -76,6 +87,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val remote = RemoteClient(viewModelScope)
     private val pairingClient = PairingClient()
     private val haptics = Haptics(app)
+    private val discoveryClient = DiscoveryClient(app)
+
+    private val discovery = DiscoveryCoordinator(
+        discovery = discoveryClient,
+        scope = viewModelScope,
+        onResolved = { host, port, fingerprint -> onReceiverResolved(host, port, fingerprint) },
+        onNeedsRepair = { message -> onRepairRequired(message) },
+        onState = { state -> _ui.value = _ui.value.copy(discovery = state) },
+    )
+
+    /** True while the user asked for a connection this session. */
+    private var autoConnectRequested = false
 
     private val _ui = MutableStateFlow(UiState(hapticsAvailable = haptics.supported))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -92,14 +115,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     hapticsEnabled = stored.hapticsEnabled,
                 )
                 speech.setContinuous(stored.continuousListening)
-                if (stored.pairing != null && remote.state.value is ConnectionState.Disconnected) {
-                    remote.start(stored.pairing)
+                val pairing = stored.pairing ?: return@collectLatest
+                if (remote.state.value is ConnectionState.Disconnected) {
+                    // First connection after start: try to find the same PC again
+                    // before falling back to the stored address.
+                    if (!autoConnectRequested) {
+                        autoConnectRequested = true
+                        discovery.start(pairing.serverId, pairing.certificateFingerprint)
+                    }
+                    // Fall back immediately: DHCP may not have changed and a
+                    // working stored address should not wait for discovery.
+                    remote.start(pairing)
                 }
             }
         }
         viewModelScope.launch {
             remote.state.collect { state ->
                 _ui.value = _ui.value.copy(connection = state)
+                if (state is ConnectionState.Connected) {
+                    // A working connection ends the search.
+                    discovery.stop()
+                }
             }
         }
         viewModelScope.launch {
@@ -172,6 +208,136 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setHapticsEnabled(enabled: Boolean) {
         _ui.value = _ui.value.copy(hapticsEnabled = enabled)
         viewModelScope.launch { settings.setHapticsEnabled(enabled) }
+    }
+
+    // ---- pairing / reconnection -------------------------------------------
+
+    /** Pairs from a scanned QR payload. */
+    fun pairWithQR(raw: String) {
+        val payload = PairingPayload.parse(raw)
+        if (payload == null) {
+            _ui.value = _ui.value.copy(
+                pairingError = "QRコードを読み取れませんでした。PC側の表示を確認してください。",
+                qrScanInProgress = false,
+            )
+            return
+        }
+        if (payload.isExpired()) {
+            _ui.value = _ui.value.copy(
+                pairingError = "QRコードの有効期限が切れています。PC側で [p] を押して表示し直してください。",
+                qrScanInProgress = false,
+            )
+            return
+        }
+
+        _ui.value = _ui.value.copy(pairingInProgress = true, pairingError = null, qrScanInProgress = false)
+        viewModelScope.launch {
+            try {
+                val existing = settings.current().pairing
+                val deviceId = existing?.deviceId ?: DeviceIds.newId()
+                val result = withContext(Dispatchers.IO) {
+                    pairingClient.pairWithQR(
+                        payload = payload,
+                        deviceId = deviceId,
+                        deviceName = android.os.Build.MODEL ?: "Android",
+                    )
+                }
+                val pairing = Pairing(
+                    deviceId = deviceId,
+                    token = result.token,
+                    host = payload.host,
+                    port = payload.port,
+                    serverName = result.serverName.ifEmpty { payload.serverName },
+                    serverId = result.serverId.ifEmpty { payload.serverId },
+                    certificateFingerprint = result.certificateFingerprint,
+                    commandPrefix = result.commandPrefix,
+                )
+                completePairing(pairing)
+            } catch (e: PairingException) {
+                _ui.value = _ui.value.copy(
+                    pairingInProgress = false,
+                    pairingError = e.message ?: "ペアリングに失敗しました",
+                )
+            } catch (e: Exception) {
+                _ui.value = _ui.value.copy(
+                    pairingInProgress = false,
+                    pairingError = "ペアリングに失敗しました: ${e.message ?: "不明なエラー"}",
+                )
+            }
+        }
+    }
+
+    fun setQrScanInProgress(inProgress: Boolean) {
+        _ui.value = _ui.value.copy(qrScanInProgress = inProgress)
+    }
+
+    /** Re-runs discovery for the stored PC and reconnects if it moved. */
+    fun retryConnection() {
+        val pairing = _ui.value.pairing ?: return
+        _ui.value = _ui.value.copy(needsRepair = null)
+        discovery.start(pairing.serverId, pairing.certificateFingerprint)
+        remote.start(pairing)
+    }
+
+    /** Stops automatic reconnection and asks the user to pair again. */
+    fun onRepairRequired(message: String) {
+        remote.stop()
+        _ui.value = _ui.value.copy(needsRepair = message)
+    }
+
+    fun clearNeedsRepair() {
+        _ui.value = _ui.value.copy(needsRepair = null)
+    }
+
+    /**
+     * A discovery result matched the stored PC. If the address really changed,
+     * the connection is restarted against the new address; the pinned
+     * fingerprint still has to match during the handshake.
+     */
+    private fun onReceiverResolved(host: String, port: Int, fingerprint: String) {
+        val pairing = _ui.value.pairing ?: return
+        val current = _ui.value.connection
+        val discovered = DiscoveredReceiver(
+            serverId = pairing.serverId,
+            serverName = pairing.serverName,
+            host = host,
+            port = port,
+            fingerprint = fingerprint,
+            hasTls = true,
+        )
+        when (val plan = ConnectionPlanner.plan(
+            storedServerId = pairing.serverId,
+            storedFingerprint = pairing.certificateFingerprint,
+            storedHost = pairing.host,
+            storedPort = pairing.port,
+            discovered = discovered,
+        )) {
+            ConnectionPlanner.Plan.KeepStored -> {
+                if (current is ConnectionState.Connected) discovery.stop()
+            }
+
+            is ConnectionPlanner.Plan.RequirePairing -> onRepairRequired(plan.message)
+
+            is ConnectionPlanner.Plan.SwitchAddress -> {
+                val updated = pairing.copy(host = plan.host, port = plan.port)
+                _ui.value = _ui.value.copy(pairing = updated)
+                viewModelScope.launch {
+                    settings.savePairing(updated)
+                    remote.start(updated)
+                }
+            }
+        }
+    }
+
+    private suspend fun completePairing(pairing: Pairing) {
+        settings.savePairing(pairing)
+        _ui.value = _ui.value.copy(
+            pairingInProgress = false,
+            pairingError = null,
+            needsRepair = null,
+            discovery = DiscoveryState.Off,
+        )
+        remote.start(pairing)
     }
 
     fun saveCustomCommand(phrase: String, sequence: String, editing: String?): Boolean {
@@ -262,9 +428,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         else -> LastAction.Failed(preview, result.error ?: "送信に失敗しました")
     }
 
+    /** Manual reconnect: also re-runs discovery, so a changed IP is handled. */
     fun reconnect() {
-        val pairing = _ui.value.pairing ?: return
-        remote.start(pairing)
+        retryConnection()
     }
 
     fun pair(
@@ -312,9 +478,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     certificateFingerprint = result.certificateFingerprint,
                     commandPrefix = result.commandPrefix,
                 )
-                settings.savePairing(pairing)
-                _ui.value = _ui.value.copy(pairingInProgress = false, pairingError = null)
-                remote.start(pairing)
+                completePairing(pairing)
             } catch (e: PairingException) {
                 _ui.value = _ui.value.copy(
                     pairingInProgress = false,
@@ -332,12 +496,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun unpair() {
         viewModelScope.launch {
             remote.stop()
+            discovery.stop()
             settings.clearPairing()
             speech.stop()
             _ui.value = _ui.value.copy(
                 lastAction = LastAction.None,
                 speech = SpeechState.Idle,
                 pairingError = null,
+                needsRepair = null,
             )
         }
     }
@@ -348,6 +514,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        discovery.stop()
         remote.stop()
         speech.release()
     }

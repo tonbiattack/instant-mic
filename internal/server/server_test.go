@@ -84,7 +84,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	ins := &fakeInserter{status: input.Status{HasFocus: true, Title: "メモ帳"}}
-	srv := New(Config{Store: store, Inserter: ins})
+	advertise := false
+	srv := New(Config{Store: store, Inserter: ins, Advertise: &advertise})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -290,6 +291,100 @@ func TestPairingClosedByDefault(t *testing.T) {
 	}
 }
 
+func (e *testEnv) pairWithQR(t *testing.T, deviceID string) string {
+	t.Helper()
+	_, _, qr, err := e.srv.BeginPairingQR(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := qr.Payload
+	body := strings.NewReader(`{"qrSecret":"` + payload.Secret + `","deviceId":"` + deviceID + `","deviceName":"QR端末"}`)
+	resp, err := http.Post(e.httpURL+"/pair", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("QR pair status = %d", resp.StatusCode)
+	}
+	var pr pairResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	return pr.Token
+}
+
+func TestQRPairingGrantsToken(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pairWithQR(t, "qr-dev")
+	if token == "" {
+		t.Fatal("no token issued")
+	}
+	// The issued token must work on the WebSocket exactly like a typed code.
+	ws := env.connect(t, "qr-dev", token)
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "qr-1", Text: "QRから入力"})
+	ack := readAck(t, ws)
+	if !ack.OK {
+		t.Fatalf("ack = %+v", ack)
+	}
+}
+
+func TestQRSecretIsSingleUse(t *testing.T) {
+	env := newTestEnv(t)
+	_, _, qr, err := env.srv.BeginPairingQR(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := qr.Payload.Secret
+
+	post := func(device string) int {
+		body := strings.NewReader(`{"qrSecret":"` + secret + `","deviceId":"` + device + `"}`)
+		resp, err := http.Post(env.httpURL+"/pair", "application/json", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if status := post("first"); status != http.StatusOK {
+		t.Fatalf("first status = %d", status)
+	}
+	// The QR and the six-digit code are consumed together.
+	if status := post("second"); status != http.StatusGone {
+		t.Fatalf("second status = %d, want 410", status)
+	}
+	if qr, ok := env.srv.PairingQR(); ok {
+		t.Fatalf("pairing window is still open: %+v", qr.Payload)
+	}
+}
+
+func TestWrongQRSecretIsRejected(t *testing.T) {
+	env := newTestEnv(t)
+	if _, _, _, err := env.srv.BeginPairingQR(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader(`{"qrSecret":"not-the-right-secret-at-all","deviceId":"dev-qr"}`)
+	resp, err := http.Post(env.httpURL+"/pair", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestPairingQRIsUnavailableWhenClosed(t *testing.T) {
+	env := newTestEnv(t)
+	if _, ok := env.srv.PairingQR(); ok {
+		t.Fatal("QR available with pairing closed")
+	}
+	env.srv.CancelPairing()
+	if _, ok := env.srv.PairingQR(); ok {
+		t.Fatal("QR available after cancel")
+	}
+}
+
 func TestBrowserOriginRejected(t *testing.T) {
 	env := newTestEnv(t)
 	req := httptest.NewRequest(http.MethodPost, "/pair", strings.NewReader(`{}`))
@@ -479,10 +574,12 @@ func TestTLSListener(t *testing.T) {
 	}
 
 	ins := &fakeInserter{status: input.Status{HasFocus: true}}
+	advertise := false
 	srv := New(Config{
-		Store:    store,
-		Inserter: ins,
-		TLS:      &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		Store:     store,
+		Inserter:  ins,
+		TLS:       &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		Advertise: &advertise,
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

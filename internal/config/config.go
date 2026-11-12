@@ -40,6 +40,9 @@ type Config struct {
 	ListenAddr    string   `json:"listenAddr"`
 	CommandPrefix string   `json:"commandPrefix"`
 	Devices       []Device `json:"devices"`
+	// DisableDiscovery turns off the LAN mDNS advertisement. Phones can still
+	// connect with a manually entered address.
+	DisableDiscovery bool `json:"disableDiscovery,omitempty"`
 }
 
 // Store is a concurrency-safe configuration store.
@@ -267,6 +270,14 @@ func (s *Store) SetCommandPrefix(prefix string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg.CommandPrefix = prefix
+	return s.saveLocked()
+}
+
+// SetDiscoveryEnabled turns the LAN mDNS advertisement on or off.
+func (s *Store) SetDiscoveryEnabled(enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.DisableDiscovery = !enabled
 	return s.saveLocked()
 }
 
