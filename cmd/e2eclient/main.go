@@ -3,7 +3,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,26 +18,50 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/tonbiattack/instant-mic/internal/protocol"
+	"github.com/tonbiattack/instant-mic/internal/server"
 )
 
 func main() {
 	host := flag.String("host", "127.0.0.1", "receiver host")
 	port := flag.Int("port", 8765, "receiver port")
 	code := flag.String("code", "", "pairing code")
+	qr := flag.String("qr", "", "pairing QR payload (copied from the console)")
+	discover := flag.Bool("discover", false, "list receivers advertised on the LAN and exit")
 	text := flag.String("text", "", "text to send")
 	key := flag.String("key", "", "key to send")
 	useTLS := flag.Bool("tls", true, "use HTTPS/WSS")
 	tokenFile := flag.String("token-file", "", "reuse/remember the device token here")
 	flag.Parse()
 
+	if *discover {
+		listDiscovered()
+		return
+	}
+
 	schemeHTTP, schemeWS := "https", "wss"
 	if !*useTLS {
 		schemeHTTP, schemeWS = "http", "ws"
 	}
 
+	// A scanned QR payload carries its own address and fingerprint; using it
+	// here reproduces exactly what the phone does.
+	var payload server.QRPayload
+	var pinned string
+	if *qr != "" {
+		parsed, err := server.ParseQRPayload(*qr)
+		if err != nil {
+			fail("qr: %v", err)
+		}
+		payload = parsed
+		*host = payload.Host
+		*port = payload.Port
+		pinned = payload.Fingerprint
+	}
+
 	base := fmt.Sprintf("%s:%d", *host, *port)
+	tlsConfig := tlsConfigFor(pinned, *useTLS)
 	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		Timeout:   5 * time.Second,
 	}
 
@@ -47,8 +73,13 @@ func main() {
 	}
 
 	if token == "" {
-		payload := fmt.Sprintf(`{"code":%q,"deviceId":"e2e-device","deviceName":"e2e"}`, *code)
-		resp, err := client.Post(schemeHTTP+"://"+base+"/pair", "application/json", strings.NewReader(payload))
+		var payloadJSON string
+		if *qr != "" {
+			payloadJSON = fmt.Sprintf(`{"qrSecret":%q,"deviceId":"e2e-device","deviceName":"e2e"}`, payload.Secret)
+		} else {
+			payloadJSON = fmt.Sprintf(`{"code":%q,"deviceId":"e2e-device","deviceName":"e2e"}`, *code)
+		}
+		resp, err := client.Post(schemeHTTP+"://"+base+"/pair", "application/json", strings.NewReader(payloadJSON))
 		if err != nil {
 			fail("pair: %v", err)
 		}
@@ -61,7 +92,7 @@ func main() {
 			fail("decode pair (status %d): %s", resp.StatusCode, body)
 		}
 		if pr.Token == "" {
-			fail("no token (status %d)", resp.StatusCode)
+			fail("no token (status %d): %s", resp.StatusCode, body)
 		}
 		token = pr.Token
 		if *tokenFile != "" {
@@ -71,7 +102,7 @@ func main() {
 	}
 
 	dialer := &websocket.Dialer{
-		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:  tlsConfig,
 		HandshakeTimeout: 5 * time.Second,
 	}
 	ws, _, err := dialer.Dial(schemeWS+"://"+base+"/ws", nil)
@@ -111,6 +142,48 @@ func main() {
 		}
 		ack := readAck(ws)
 		fmt.Printf("key ack: ok=%v applied=%s error=%q\n", ack.OK, ack.Applied, ack.Error)
+	}
+}
+
+// tlsConfigFor mirrors the app: a pinned fingerprint when one is known,
+// otherwise accept the self-signed certificate and rely on the pairing token.
+func tlsConfigFor(pinned string, useTLS bool) *tls.Config {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if !useTLS {
+		return cfg
+	}
+	if pinned == "" {
+		cfg.InsecureSkipVerify = true
+		return cfg
+	}
+	expected := strings.ToLower(pinned)
+	cfg.InsecureSkipVerify = true // verified manually below, like the phone
+	cfg.VerifyConnection = func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
+			return fmt.Errorf("no peer certificate")
+		}
+		sum := sha256.Sum256(state.PeerCertificates[0].Raw)
+		actual := hex.EncodeToString(sum[:])
+		if actual != expected {
+			return fmt.Errorf("certificate fingerprint mismatch: got %s", actual)
+		}
+		return nil
+	}
+	return cfg
+}
+
+func listDiscovered() {
+	found, err := server.BrowseReceivers(4 * time.Second)
+	if err != nil {
+		fail("discover: %v", err)
+	}
+	if len(found) == 0 {
+		fmt.Println("no receiver found")
+		return
+	}
+	for _, r := range found {
+		fmt.Printf("%s id=%s host=%s port=%d fp=%s tls=%v\n",
+			r.Name, r.ServerID, r.Host, r.Port, r.Fingerprint, r.HasTLS)
 	}
 }
 

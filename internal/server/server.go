@@ -28,6 +28,12 @@ type Config struct {
 	Pairing   *Pairing
 	OnEvent   func(Event)
 	OnClients func(int)
+	// Fingerprint is the SHA-256 of the TLS certificate, used in the pairing QR
+	// code so the phone can pin it during the first pairing.
+	Fingerprint string
+	// Advertise controls the mDNS/DNS-SD advertisement. Discovery is on by
+	// default because it never authenticates anything by itself.
+	Advertise *bool
 }
 
 // Event is an observation for the UI log.
@@ -47,6 +53,10 @@ type Server struct {
 	onEvent  func(Event)
 	onClient func(int)
 	dedupe   *dedupe
+
+	fingerprint string
+	advertise   bool
+	advertiser  *advertiser
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -78,17 +88,23 @@ func New(cfg Config) *Server {
 	if cfg.Inserter == nil {
 		panic("server: inserter is required")
 	}
+	advertise := true
+	if cfg.Advertise != nil {
+		advertise = *cfg.Advertise
+	}
 	return &Server{
-		store:    cfg.Store,
-		inserter: cfg.Inserter,
-		tls:      cfg.TLS,
-		log:      logger,
-		pairing:  cfg.Pairing,
-		onEvent:  cfg.OnEvent,
-		onClient: cfg.OnClients,
-		dedupe:   newDedupe(10*time.Minute, 1024),
-		conns:    map[*conn]struct{}{},
-		failures: map[string]failInfo{},
+		store:       cfg.Store,
+		inserter:    cfg.Inserter,
+		tls:         cfg.TLS,
+		log:         logger,
+		pairing:     cfg.Pairing,
+		onEvent:     cfg.OnEvent,
+		onClient:    cfg.OnClients,
+		dedupe:      newDedupe(10*time.Minute, 1024),
+		fingerprint: cfg.Fingerprint,
+		advertise:   advertise,
+		conns:       map[*conn]struct{}{},
+		failures:    map[string]failInfo{},
 	}
 }
 
@@ -153,6 +169,19 @@ func (s *Server) serve(ln net.Listener) {
 	s.addr.Store(ln.Addr().String())
 	s.mu.Unlock()
 
+	// Discovery advertises only the server ID and the TLS endpoint. It never
+	// authenticates or authorises anything: a phone still needs its paired token
+	// (or a valid pairing window) to talk to the receiver.
+	if s.advertise {
+		s.advertiser = startAdvertiser(advertiseInfo{
+			ServerID:    s.store.Snapshot().ServerID,
+			ServerName:  s.store.Snapshot().ServerName,
+			Port:        portOf(ln.Addr()),
+			Fingerprint: s.fingerprint,
+			HasTLS:      s.tls != nil,
+		}, s.emit)
+	}
+
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			s.emit("error", "server stopped: "+err.Error())
@@ -187,6 +216,10 @@ func (s *Server) Port() int {
 
 // Close stops the server and disconnects clients.
 func (s *Server) Close() error {
+	if s.advertiser != nil {
+		s.advertiser.stop()
+		s.advertiser = nil
+	}
 	s.mu.Lock()
 	srv := s.httpSrv
 	conns := make([]*conn, 0, len(s.conns))
@@ -241,6 +274,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 type pairRequest struct {
 	Code       string `json:"code"`
+	QRSecret   string `json:"qrSecret"`
 	DeviceID   string `json:"deviceId"`
 	DeviceName string `json:"deviceName"`
 }
@@ -276,13 +310,20 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid deviceId", http.StatusBadRequest)
 		return
 	}
-	if err := s.pairing.Verify(req.Code); err != nil {
-		s.emit("warn", "ペアリング失敗: "+err.Error())
+	var verifyErr error
+	switch {
+	case strings.TrimSpace(req.QRSecret) != "":
+		verifyErr = s.pairing.VerifySecret(req.QRSecret)
+	default:
+		verifyErr = s.pairing.Verify(req.Code)
+	}
+	if verifyErr != nil {
+		s.emit("warn", "ペアリング失敗: "+verifyErr.Error())
 		status := http.StatusForbidden
-		if errors.Is(err, ErrPairingExpired) || errors.Is(err, ErrPairingClosed) {
+		if errors.Is(verifyErr, ErrPairingExpired) || errors.Is(verifyErr, ErrPairingClosed) {
 			status = http.StatusGone
 		}
-		http.Error(w, err.Error(), status)
+		http.Error(w, verifyErr.Error(), status)
 		return
 	}
 

@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -49,6 +50,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
@@ -63,6 +66,7 @@ object TestTags {
     const val PAIR_PORT = "pair_port"
     const val PAIR_CODE = "pair_code"
     const val PAIR_SUBMIT = "pair_submit"
+    const val PAIR_QR = "pair_qr"
     const val CONNECTION_STATUS = "connection_status"
     const val ACTION_STATUS = "action_status"
     const val SPEECH_STATUS = "speech_status"
@@ -116,6 +120,7 @@ fun MainScreen(
                     state = state,
                     onPair = viewModel::pair,
                     onDismissError = viewModel::clearPairingError,
+                    onQRScanned = viewModel::pairWithQR,
                 )
             } else if (showCommands) {
                 CommandsPanel(
@@ -127,10 +132,19 @@ fun MainScreen(
                     onHapticsChange = viewModel::setHapticsEnabled,
                 )
             } else {
+                val repair = state.needsRepair
+                if (repair != null) {
+                    RepairCard(
+                        message = repair,
+                        onRepair = viewModel::unpair,
+                        onRetry = viewModel::retryConnection,
+                    )
+                }
                 ConnectionCard(
                     connection = state.connection,
                     pairing = pairing,
-                    onReconnect = viewModel::reconnect,
+                    discovery = state.discovery,
+                    onReconnect = viewModel::retryConnection,
                 )
                 MicrophonePanel(
                     state = state,
@@ -150,6 +164,7 @@ fun MainScreen(
 private fun ConnectionCard(
     connection: ConnectionState,
     pairing: Pairing,
+    discovery: DiscoveryState,
     onReconnect: () -> Unit,
 ) {
     val (label, color) = when (connection) {
@@ -174,8 +189,54 @@ private fun ConnectionCard(
             if (latency != null && latency >= 0) {
                 Text("遅延: 約 ${latency}ms", style = MaterialTheme.typography.bodySmall)
             }
+            DiscoveryLine(discovery, connection)
             if (connection !is ConnectionState.Connected) {
                 OutlinedButton(onClick = onReconnect) { Text("再接続") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryLine(discovery: DiscoveryState, connection: ConnectionState) {
+    val text = when (discovery) {
+        DiscoveryState.Off ->
+            if (connection is ConnectionState.Connected) null else "自動検出: 未使用"
+        DiscoveryState.Searching -> "自動検出: 同じPCを検索しています…"
+        is DiscoveryState.Found ->
+            "自動検出: ${discovery.receivers.size}台のPCを検出（ペアリング済みのPCを優先）"
+        is DiscoveryState.Unavailable -> "自動検出: 利用できません（${discovery.message}）"
+    }
+    if (text != null) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun RepairCard(
+    message: String,
+    onRepair: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "再ペアリングが必要です",
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onRepair) { Text("ペアリングし直す") }
+                OutlinedButton(onClick = onRetry) { Text("再試行") }
             }
         }
     }
@@ -647,56 +708,60 @@ private fun PairingPanel(
     state: UiState,
     onPair: (String, String, String, String?) -> Unit,
     onDismissError: () -> Unit,
+    onQRScanned: (String) -> Unit,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("8765") }
     var code by rememberSaveable { mutableStateOf("") }
     var fingerprint by rememberSaveable { mutableStateOf("") }
+    var manual by rememberSaveable { mutableStateOf(false) }
+
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val contents = result.contents
+        if (contents.isNullOrBlank()) {
+            // Cancelled: keep the pairing screen, nothing to report.
+            return@rememberLauncherForActivityResult
+        }
+        onQRScanned(contents)
+    }
+    val launchScanner = {
+        val options = ScanOptions().apply {
+            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            setPrompt("PCに表示されたQRコードを読み取ります")
+            setBeepEnabled(false)
+            setOrientationLocked(false)
+        }
+        scanner.launch(options)
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.titleLarge)
         Text(
-            "PCで受信アプリを起動し、[p] を押して表示された6桁のコードを入力してください。",
+            "PCで受信アプリを起動し [p] を押すと、QRコードが表示されます。読み取るだけで接続できます。",
             style = MaterialTheme.typography.bodyMedium,
         )
-        OutlinedTextField(
-            value = host,
-            onValueChange = { host = it },
-            label = { Text("PCのIPアドレス") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+
+        Button(
+            onClick = launchScanner,
+            enabled = !state.pairingInProgress,
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag(TestTags.PAIR_HOST),
-        )
-        OutlinedTextField(
-            value = port,
-            onValueChange = { port = it.filter(Char::isDigit).take(5) },
-            label = { Text("ポート") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(TestTags.PAIR_PORT),
-        )
-        OutlinedTextField(
-            value = code,
-            onValueChange = { code = it.filter(Char::isDigit).take(6) },
-            label = { Text("6桁のコード") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(TestTags.PAIR_CODE),
-        )
-        OutlinedTextField(
-            value = fingerprint,
-            onValueChange = { fingerprint = it },
-            label = { Text("証明書の指紋（任意）") },
-            supportingText = { Text("PC画面に表示された値を貼り付けると改ざん検出が強くなります") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+                .heightIn(min = 72.dp)
+                .testTag(TestTags.PAIR_QR),
+        ) {
+            if (state.pairingInProgress) {
+                CircularProgressIndicator(
+                    Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+                Spacer(Modifier.size(10.dp))
+                Text(if (state.pairingInProgress) "接続しています…" else "QRコードを読み取る")
+            } else {
+                Text("QRコードを読み取る", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+
         if (state.pairingError != null) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Column(Modifier.padding(12.dp)) {
@@ -705,7 +770,54 @@ private fun PairingPanel(
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+
+        TextButton(onClick = { manual = !manual }) {
+            Text(if (manual) "手動入力を閉じる" else "QRを読み取れない場合は手動で入力")
+        }
+
+        if (manual) {
+            Text(
+                "PC画面に表示された6桁のコードを入力してください。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(
+                value = host,
+                onValueChange = { host = it },
+                label = { Text("PCのIPアドレス") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TestTags.PAIR_HOST),
+            )
+            OutlinedTextField(
+                value = port,
+                onValueChange = { port = it.filter(Char::isDigit).take(5) },
+                label = { Text("ポート") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TestTags.PAIR_PORT),
+            )
+            OutlinedTextField(
+                value = code,
+                onValueChange = { code = it.filter(Char::isDigit).take(6) },
+                label = { Text("6桁のコード") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(TestTags.PAIR_CODE),
+            )
+            OutlinedTextField(
+                value = fingerprint,
+                onValueChange = { fingerprint = it },
+                label = { Text("証明書の指紋（任意）") },
+                supportingText = { Text("PC画面に表示された値を貼り付けると改ざん検出が強くなります") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Button(
                 onClick = { onPair(host, port, code, fingerprint.ifBlank { null }) },
                 enabled = !state.pairingInProgress,

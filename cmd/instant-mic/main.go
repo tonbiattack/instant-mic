@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tonbiattack/instant-mic/internal/autostart"
 	"github.com/tonbiattack/instant-mic/internal/config"
 	"github.com/tonbiattack/instant-mic/internal/input"
 	"github.com/tonbiattack/instant-mic/internal/netutil"
@@ -34,6 +35,7 @@ func main() {
 }
 
 func run(args []string) error {
+	enableUTF8Console()
 	fs := flag.NewFlagSet("instant-mic", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -47,6 +49,9 @@ func run(args []string) error {
 		unpair     = fs.String("unpair", "", "remove a paired device by id/name and exit")
 		setPrefix  = fs.String("command-prefix", "", "set the voice command prefix and exit")
 		verbose    = fs.Bool("verbose", false, "log connection details")
+		trayMode   = fs.Bool("tray", false, "run with a notification-area icon and no console output")
+		noDiscover = fs.Bool("no-discovery", false, "disable LAN mDNS advertisement")
+		autoStart  = fs.String("autostart", "", "on|off: start at Windows login; report the current state when empty")
 	)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -81,6 +86,21 @@ func run(args []string) error {
 		fmt.Println("コマンド接頭語を更新しました:", *setPrefix)
 		return nil
 	}
+	if *autoStart != "" {
+		return setAutostart(store, *autoStart)
+	}
+	if *noDiscover {
+		if err := store.SetDiscoveryEnabled(false); err != nil {
+			return err
+		}
+		fmt.Println("LAN内の自動検出を無効にしました。")
+		return nil
+	}
+	if !*trayMode {
+		if enabled, err := autostart.Enabled(); err == nil && enabled && !*showPair {
+			fmt.Println("ヒント: Windowsログイン時に自動起動します（無効化: -autostart off）")
+		}
+	}
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -112,26 +132,35 @@ func run(args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		Store:    store,
-		Inserter: input.New(),
-		TLS:      tlsConf,
-		Logger:   logger,
+		Store:       store,
+		Inserter:    input.New(),
+		TLS:         tlsConf,
+		Logger:      logger,
+		Fingerprint: fingerprint,
+		Advertise:   advertiseFlag(!cfg.DisableDiscovery),
 	})
 	if err := srv.Start(listen); err != nil {
 		return fmt.Errorf("listen on %s: %w", listen, err)
 	}
 	defer srv.Close()
 
-	printBanner(srv, store, tlsConf != nil, fingerprint)
-	if *showPair {
-		openPairing(srv, *pairTTL)
+	if *trayMode {
+		// The tray has no console; status is visible from the icon menu.
+		return runTray(srv, store, *pairTTL, *showPair)
+	}
+
+	if !*trayMode {
+		printBanner(srv, store, tlsConf != nil, fingerprint)
+		if *showPair {
+			openPairing(srv, *pairTTL, *verbose)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	quit := make(chan struct{})
-	go consoleLoop(ctx, srv, store, *pairTTL, quit)
+	go consoleLoop(ctx, srv, store, *pairTTL, *verbose, quit)
 
 	select {
 	case <-ctx.Done():
@@ -140,6 +169,8 @@ func run(args []string) error {
 	fmt.Println("\n終了します…")
 	return nil
 }
+
+func advertiseFlag(enabled bool) *bool { return &enabled }
 
 func printBanner(srv *server.Server, store *config.Store, tlsEnabled bool, fingerprint string) {
 	cfg := store.Snapshot()
@@ -169,9 +200,14 @@ func printBanner(srv *server.Server, store *config.Store, tlsEnabled bool, finge
 	for _, ip := range ips {
 		fmt.Printf("    %s://%s:%d\n", supported, ip, port)
 	}
+	if !cfg.DisableDiscovery {
+		fmt.Println("  自動検出   : 有効（同じLANのスマホから自動で見つかります）")
+	} else {
+		fmt.Println("  自動検出   : 無効")
+	}
 
 	fmt.Println()
-	fmt.Println("  操作: [p] ペアリング開始  [d] 端末一覧  [q] 終了")
+	fmt.Println("  操作: [p] ペアリング開始（QR表示）  [d] 端末一覧  [q] 終了")
 	fmt.Println("  ※ 入力先アプリをクリックしてフォーカスしたまま音声入力してください")
 	fmt.Println()
 
@@ -181,8 +217,8 @@ func printBanner(srv *server.Server, store *config.Store, tlsEnabled bool, finge
 	}
 }
 
-func openPairing(srv *server.Server, ttl time.Duration) {
-	code, expires, err := srv.BeginPairing(ttl)
+func openPairing(srv *server.Server, ttl time.Duration, verbose bool) {
+	code, expires, qr, err := srv.BeginPairingQR(ttl)
 	if err != nil {
 		fmt.Println("ペアリングを開始できません:", err)
 		return
@@ -190,11 +226,17 @@ func openPairing(srv *server.Server, ttl time.Duration) {
 	fmt.Println()
 	fmt.Println("  ペアリングコード:", code)
 	fmt.Printf("  有効期限: %s（%.0f分）\n", expires.Format("15:04:05"), ttl.Minutes())
-	fmt.Println("  Android アプリの「ペアリング」画面でこのコードを入力してください。")
+	fmt.Println()
+	fmt.Println("  スマホの「QRでペアリング」で以下を読み取るか、6桁コードを入力してください。")
+	fmt.Println()
+	fmt.Print(qr.Payload.RenderQRText())
+	if verbose {
+		fmt.Println("  QRペイロード:", qr.Payload.String())
+	}
 	fmt.Println()
 }
 
-func consoleLoop(ctx context.Context, srv *server.Server, store *config.Store, ttl time.Duration, quit chan<- struct{}) {
+func consoleLoop(ctx context.Context, srv *server.Server, store *config.Store, ttl time.Duration, verbose bool, quit chan<- struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		select {
@@ -204,7 +246,7 @@ func consoleLoop(ctx context.Context, srv *server.Server, store *config.Store, t
 		}
 		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
 		case "p", "pair":
-			openPairing(srv, ttl)
+			openPairing(srv, ttl, verbose)
 		case "c", "cancel":
 			srv.CancelPairing()
 		case "d", "devices":
@@ -257,4 +299,37 @@ func removeDevice(store *config.Store, target string) error {
 		}
 	}
 	return fmt.Errorf("端末が見つかりません: %s", target)
+}
+
+// setAutostart turns the login-start registration on or off, or reports it when
+// the flag is empty.
+func setAutostart(store *config.Store, value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "enable", "true":
+		if err := autostart.Set(true); err != nil {
+			return fmt.Errorf("自動起動を設定できません: %w", err)
+		}
+		fmt.Println("Windowsログイン時に自動起動するように設定しました。")
+		fmt.Println("次回からタスクトレイ常駐で起動します。")
+		return nil
+	case "off", "disable", "false":
+		if err := autostart.Set(false); err != nil {
+			return fmt.Errorf("自動起動を解除できません: %w", err)
+		}
+		fmt.Println("自動起動を解除しました。")
+		return nil
+	case "status":
+		enabled, err := autostart.Enabled()
+		if err != nil {
+			return err
+		}
+		if enabled {
+			fmt.Println("自動起動: 有効")
+		} else {
+			fmt.Println("自動起動: 無効")
+		}
+		return nil
+	default:
+		return fmt.Errorf("-autostart は on / off / status のいずれかです: %q", value)
+	}
 }
