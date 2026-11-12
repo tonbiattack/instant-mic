@@ -48,16 +48,14 @@ type Server struct {
 	onClient func(int)
 	dedupe   *dedupe
 
-	mu     sync.Mutex
-	conns  map[*conn]struct{}
-	expiry *time.Timer
+	mu    sync.Mutex
+	conns map[*conn]struct{}
 
 	failMu   sync.Mutex
 	failures map[string]failInfo
 
-	httpSrv  *http.Server
-	listener net.Listener
-	addr     atomic.Value // string
+	httpSrv *http.Server
+	addr    atomic.Value // string
 }
 
 type failInfo struct {
@@ -151,7 +149,6 @@ func (s *Server) serve(ln net.Listener) {
 		IdleTimeout:       90 * time.Second,
 	}
 	s.mu.Lock()
-	s.listener = ln
 	s.httpSrv = srv
 	s.addr.Store(ln.Addr().String())
 	s.mu.Unlock()

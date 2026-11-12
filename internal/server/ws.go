@@ -31,6 +31,26 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
 }
 
+// pingLoop keeps the connection alive and lets the client measure latency.
+func (c *conn) pingLoop() {
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.writeMu.Lock()
+		if c.closed {
+			c.writeMu.Unlock()
+			return
+		}
+		_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+		err := c.ws.WriteMessage(websocket.PingMessage, nil)
+		c.writeMu.Unlock()
+		if err != nil {
+			c.close(websocket.CloseGoingAway, "")
+			return
+		}
+	}
+}
+
 type conn struct {
 	srv    *Server
 	ws     *websocket.Conn
@@ -112,6 +132,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.dropConn(c)
 		return
 	}
+	go c.pingLoop()
 	c.readLoop()
 }
 

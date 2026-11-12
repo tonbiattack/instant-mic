@@ -6,7 +6,6 @@ package input
 
 import (
 	"errors"
-	"time"
 
 	"github.com/tonbiattack/instant-mic/internal/speech"
 )
@@ -34,20 +33,4 @@ type Inserter interface {
 	PressKey(key speech.Key) error
 	// Status inspects the current foreground window.
 	Status() Status
-}
-
-// WaitForStableFocus gives the user a moment to keep the target window focused
-// and reports whether focus is usable.
-func WaitForStableFocus(in Inserter, timeout time.Duration) (Status, bool) {
-	deadline := time.Now().Add(timeout)
-	for {
-		st := in.Status()
-		if st.HasFocus && !st.Elevated {
-			return st, true
-		}
-		if time.Now().After(deadline) {
-			return st, false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }

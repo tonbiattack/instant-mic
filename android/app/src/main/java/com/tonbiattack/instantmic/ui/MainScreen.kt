@@ -100,7 +100,7 @@ fun MainScreen(
                         if (!state.microphoneGranted) onRequestMicrophone() else viewModel.toggleListening()
                     },
                 )
-                ActionStatus(state)
+                ActionStatus(state, onDismiss = viewModel::dismissAction)
                 CapabilityNotice(state)
                 Spacer(Modifier.height(24.dp))
             }
@@ -186,13 +186,24 @@ private fun MicrophonePanel(
             textAlign = TextAlign.Center,
         )
         if (listening) {
-            TextButton(onClick = { }) { Text("認識結果は確定後のみ送信されます") }
+            Text(
+                "認識結果は確定後のみ送信されます",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (!listening && state.lastAction is LastAction.None && state.lastText.isNotEmpty()) {
+            Text(
+                "前回の送信: ${state.lastText.take(40)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
 
 @Composable
-private fun ActionStatus(state: UiState) {
+private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
     val action = state.lastAction
     if (action is LastAction.None) return
     val (text, isError) = when (action) {
@@ -210,13 +221,21 @@ private fun ActionStatus(state: UiState) {
             else MaterialTheme.colorScheme.secondaryContainer,
         ),
     ) {
-        Text(
-            text,
+        Row(
             modifier = Modifier
-                .padding(14.dp)
-                .testTag(TestTags.ACTION_STATUS),
-            style = MaterialTheme.typography.bodyMedium,
-        )
+                .fillMaxWidth()
+                .padding(start = 14.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(TestTags.ACTION_STATUS),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(onClick = onDismiss) { Text("閉じる") }
+        }
     }
 }
 

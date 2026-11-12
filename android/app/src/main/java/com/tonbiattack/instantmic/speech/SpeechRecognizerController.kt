@@ -15,7 +15,13 @@ sealed interface SpeechState {
     data object Idle : SpeechState
     data object Listening : SpeechState
     data object Processing : SpeechState
-    data class Result(val text: String) : SpeechState
+
+    /**
+     * A finalized transcript. The sequence number keeps two identical phrases
+     * distinct so that saying the same thing twice still sends twice.
+     */
+    data class Result(val text: String, val sequence: Long) : SpeechState
+
     data class Failed(val message: String, val retryable: Boolean) : SpeechState
 }
 
@@ -42,6 +48,7 @@ class SpeechRecognizerController(private val context: Context) {
 
     private var recognizer: SpeechRecognizer? = null
     private var listening = false
+    private var resultCounter = 0L
 
     fun capability(): RecognizerCapability {
         val available = SpeechRecognizer.isRecognitionAvailable(context)
@@ -165,7 +172,8 @@ class SpeechRecognizerController(private val context: Context) {
             if (text.isEmpty()) {
                 _state.value = SpeechState.Failed("聞き取れませんでした", retryable = true)
             } else {
-                _state.value = SpeechState.Result(text)
+                resultCounter += 1
+                _state.value = SpeechState.Result(text, resultCounter)
             }
         }
 
