@@ -48,6 +48,39 @@ sealed interface SpeechState {
 /** One finalized transcript. The session ID makes identical phrases distinct. */
 data class Transcript(val text: String, val sessionId: Long)
 
+/**
+ * The recognizer's live, unconfirmed text for the current session.
+ *
+ * This is what the phone draws while the user speaks. It is never a command and
+ * never typed verbatim; only settled phrases reach the PC (see [PhraseEmitted]).
+ */
+data class LiveTranscript(val text: String, val sessionId: Long)
+
+/**
+ * A settled phrase of the live transcript that was typed into the PC before the
+ * user finished speaking.
+ *
+ * [text] is the exact shaped text that was appended to the document, and
+ * [sessionId] lets the view model report a revision conflict to the right
+ * utterance. The remainder of the utterance arrives later as a [Transcript].
+ */
+data class PhraseEmitted(val text: String, val sessionId: Long)
+
+/** One alternative reading of the same audio, best first. */
+data class RecognitionAlternative(val text: String, val confidence: Float?)
+
+/**
+ * The final result together with any alternatives the recognizer supplied.
+ *
+ * Candidates are surfaced for comparison, never switched to automatically: a
+ * wrong automatic switch would be worse than the user tapping the right one.
+ */
+data class RecognitionResult(
+    val best: Transcript,
+    val alternatives: List<RecognitionAlternative>,
+    val onDevice: Boolean?,
+)
+
 /** Start/stop feedback for the phone's vibrator. */
 enum class HapticCue { Ready, SpeechEnd }
 
@@ -56,15 +89,18 @@ data class RecognizerCapability(
     val available: Boolean,
     val onDeviceAvailable: Boolean,
     val requiresNetwork: Boolean,
+    /** The service Android will use, when it can be determined. */
+    val serviceName: String? = null,
 )
 
 /**
  * Wraps Android's SpeechRecognizer with an optional continuous loop.
  *
- * Only finalized results are surfaced: partial results are ignored so a phrase
- * can never be sent twice while the user is still speaking. Each recognition
- * session gets an ID and reports at most one transcript, which keeps a
- * retried/duplicated callback from typing the same phrase twice.
+ * Partial results are shown live but are only sent as *settled phrases* when
+ * the user enabled incremental input; the final result is authoritative and is
+ * sent exactly once. Each recognition session gets an ID and reports at most
+ * one final transcript, which keeps a retried/duplicated callback from typing
+ * the same phrase twice.
  *
  * In continuous mode the recognizer is restarted after each finalized result
  * (and after recoverable endings such as silence) until the user stops. Restarts
@@ -82,6 +118,15 @@ class SpeechRecognizerController(
     private val _results = MutableSharedFlow<Transcript>(extraBufferCapacity = 8)
     val results: SharedFlow<Transcript> = _results.asSharedFlow()
 
+    private val _alternatives = MutableSharedFlow<RecognitionResult>(extraBufferCapacity = 8)
+    val alternatives: SharedFlow<RecognitionResult> = _alternatives.asSharedFlow()
+
+    private val _partials = MutableSharedFlow<LiveTranscript>(extraBufferCapacity = 16)
+    val partials: SharedFlow<LiveTranscript> = _partials.asSharedFlow()
+
+    private val _phrases = MutableSharedFlow<PhraseEmitted>(extraBufferCapacity = 16)
+    val phrases: SharedFlow<PhraseEmitted> = _phrases.asSharedFlow()
+
     private val _cues = MutableSharedFlow<HapticCue>(extraBufferCapacity = 8)
     val cues: SharedFlow<HapticCue> = _cues.asSharedFlow()
 
@@ -90,15 +135,19 @@ class SpeechRecognizerController(
 
     /** Desired running state. Stays true across the continuous loop. */
     private var running = false
-    private var continuous = true
-    private var languageTag = "ja-JP"
-    private var preferOnDevice = true
+    private var options = RecognitionOptions()
 
     /** Bumped for every startListening so stale callbacks can be ignored. */
     private var sessionId = 0L
     private var deliveredSession = 0L
     private var readyCueSent = false
     private var endCueSent = false
+
+    /** Settled-phrase tracking for the current session, when enabled. */
+    private var incremental: IncrementalSender? = null
+
+    /** True when the recognizer reported that it is using on-device ASR. */
+    private var onDeviceSession: Boolean? = null
 
     /** Consecutive recoverable endings, used for backoff and error limits. */
     private var recoverableAttempts = 0
@@ -112,27 +161,45 @@ class SpeechRecognizerController(
             available = available,
             onDeviceAvailable = onDevice,
             requiresNetwork = available && !onDevice,
+            serviceName = recognitionServiceName(),
         )
     }
 
+    /**
+     * The recognition service Android resolves for this app.
+     *
+     * The package name is enough for the settings screen: it tells the user
+     * which engine actually runs, instead of only which hint was requested.
+     */
+    private fun recognitionServiceName(): String? {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.resolveService(
+                intent,
+                android.content.pm.PackageManager.ResolveInfoFlags.of(0),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.resolveService(intent, 0)
+        } ?: return null
+        return resolved.serviceInfo?.packageName
+    }
+
+    /** The current recognition options, for display next to the settings. */
+    val currentOptions: RecognitionOptions
+        get() = options
+
     /** One tap: start listening, or stop an active session. */
-    fun toggle(continuous: Boolean = this.continuous) {
+    fun toggle() {
         if (running || state.value.isActive) {
             stop()
             return
         }
-        start(continuous = continuous)
+        start()
     }
 
-    fun start(
-        continuous: Boolean = this.continuous,
-        languageTag: String = this.languageTag,
-        preferOnDevice: Boolean = this.preferOnDevice,
-    ) {
-        this.continuous = continuous
-        this.languageTag = languageTag
-        this.preferOnDevice = preferOnDevice
-
+    fun start(overrides: RecognitionOptions = options) {
+        options = overrides
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             running = false
             _state.value = SpeechState.Failed("この端末では音声認識を利用できません", retryable = false)
@@ -145,6 +212,11 @@ class SpeechRecognizerController(
         recoverableAttempts = 0
         consecutiveFailures = 0
         beginSession()
+    }
+
+    /** Applies new options to the next session without stopping the loop. */
+    fun updateOptions(newOptions: RecognitionOptions) {
+        options = newOptions
     }
 
     /** User-initiated stop. No automatic restart happens after this. */
@@ -161,6 +233,7 @@ class SpeechRecognizerController(
         }
         readyCueSent = false
         endCueSent = false
+        incremental = null
         val current = recognizer
         recognizer = null
         if (current != null) {
@@ -183,7 +256,7 @@ class SpeechRecognizerController(
 
     /** Switches continuous mode; a running loop picks it up at the next ending. */
     fun setContinuous(enabled: Boolean) {
-        continuous = enabled
+        options = options.copy(continuous = enabled)
         if (!enabled && state.value is SpeechState.Resuming) {
             // The pending restart would only continue the loop.
             restartJob?.cancel()
@@ -205,6 +278,12 @@ class SpeechRecognizerController(
         sessionId += 1
         readyCueSent = false
         endCueSent = false
+        onDeviceSession = null
+        incremental = if (options.incremental == IncrementalMode.StablePrefixes) {
+            IncrementalSender()
+        } else {
+            null
+        }
         _state.value = SpeechState.Preparing
         try {
             created.startListening(buildIntent())
@@ -243,24 +322,62 @@ class SpeechRecognizerController(
     private fun buildIntent(): Intent =
         Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, languageTag)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, options.languageTag)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, options.languageTag)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, options.partialResults)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, options.maxResults.coerceIn(1, 5))
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-            if (continuous) {
-                // End an utterance after a natural pause so the next phrase can
-                // start a new session. Recognizers that do not support these
-                // hints simply ignore them.
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
+            if (options.continuous) {
+                // End an utterance after a pause so the next phrase can start a
+                // new session. Recognizers that do not support these hints
+                // simply ignore them; the setting only changes the request.
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    options.silence.completeMillis,
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    options.silence.possiblyCompleteMillis,
+                )
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && preferOnDevice) {
-                if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            if (options.biasingTerms.isNotEmpty()) {
+                // Undocumented but widely read by Google's recognizer. Services
+                // that do not know the key ignore it.
+                putStringArrayListExtra(
+                    EXTRA_BIASING_STRINGS,
+                    ArrayList(options.biasingTerms.take(MAX_BIASING_TERMS)),
+                )
+            }
+            when (options.engine) {
+                RecognitionEngine.OnDevice -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+                            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                                // Undocumented in the public SDK but read by
+                                // Google's recognizer; other services ignore it.
+                                putExtra(
+                                    EXTRA_ENABLE_ON_DEVICE_OPTIONS,
+                                    onDeviceOptions(),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                RecognitionEngine.System -> {
+                    // Do not set EXTRA_PREFER_OFFLINE: the caller asked for the
+                    // system default even when that means the network.
                 }
             }
         }
+
+    private fun onDeviceOptions(): Bundle = Bundle().apply {
+        putBoolean("enableFormatting", true)
+        putBoolean("enable punctuation", true)
+        putBoolean("enableSpokenPunctuation", true)
+        putBoolean("enableSpokenEmojis", false)
+    }
 
     /**
      * Restarts recognition once after a delay. Recoverable endings (silence, no
@@ -269,7 +386,7 @@ class SpeechRecognizerController(
      */
     private fun scheduleNextSession() {
         if (!running) return
-        if (!continuous) {
+        if (!options.continuous) {
             running = false
             _state.value = SpeechState.Idle
             return
@@ -296,6 +413,24 @@ class SpeechRecognizerController(
         restartJob = null
         recreateRecognizer()
         _state.value = SpeechState.Failed(message, retryable)
+    }
+
+    /**
+     * Reads the recognizer's alternatives, best first. An empty list means the
+     * recognizer supplied only one reading.
+     */
+    private fun alternativesFrom(results: Bundle?, best: String): List<RecognitionAlternative> {
+        val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?: return emptyList()
+        val scores = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+        val out = ArrayList<RecognitionAlternative>(texts.size)
+        for ((index, raw) in texts.withIndex()) {
+            val text = raw.trim()
+            if (text.isEmpty() || text == best) continue
+            val confidence = scores?.getOrNull(index)?.takeIf { it >= 0f }
+            out.add(RecognitionAlternative(text, confidence))
+        }
+        return out
     }
 
     private val listener = object : RecognitionListener {
@@ -356,7 +491,23 @@ class SpeechRecognizerController(
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            // Deliberately ignored: interim results must never be sent.
+            if (!running) return
+            val text = partialResults
+                ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.firstOrNull()
+                ?.trimStart()
+                .orEmpty()
+            if (text.isEmpty()) return
+
+            // The phone always shows the live text, even when nothing is being
+            // typed yet. This is a preview, never a command.
+            _partials.tryEmit(LiveTranscript(text, sessionId))
+
+            val sender = incremental ?: return
+            val phrase = sender.nextPhrase(text) ?: return
+            if (phrase.isNotBlank()) {
+                _phrases.tryEmit(PhraseEmitted(phrase, sessionId))
+            }
         }
 
         override fun onResults(results: Bundle?) {
@@ -367,6 +518,9 @@ class SpeechRecognizerController(
                 ?.firstOrNull()
                 ?.trim()
                 .orEmpty()
+            val extras = results?.takeIf { it.containsKey(EXTRA_ON_DEVICE) }
+                ?.getBoolean(EXTRA_ON_DEVICE)
+                ?: onDeviceSession
 
             if (text.isEmpty()) {
                 consecutiveFailures = 0
@@ -375,14 +529,44 @@ class SpeechRecognizerController(
             }
             if (deliveredSession != sessionId) {
                 deliveredSession = sessionId
-                _results.tryEmit(Transcript(text, sessionId))
+                val transcript = Transcript(text, sessionId)
+                val alternatives = alternativesFrom(results, text)
+                if (alternatives.isNotEmpty() || extras != null) {
+                    _alternatives.tryEmit(RecognitionResult(transcript, alternatives, extras))
+                }
+                _results.tryEmit(transcript)
             }
             consecutiveFailures = 0
             recoverableAttempts = 0
             scheduleNextSession()
         }
 
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
+        override fun onEvent(eventType: Int, params: Bundle?) {
+            // Some recognizers report the chosen model through onEvent. This is
+            // advisory only; it never changes what is sent.
+            if (eventType == EVENT_ON_DEVICE) {
+                onDeviceSession = params?.getBoolean(EXTRA_ON_DEVICE) ?: true
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * Undocumented hint read by Google's recognizer for vocabulary biasing.
+         * Kept as a string so a service that does not know it simply ignores it.
+         */
+        private const val EXTRA_BIASING_STRINGS =
+            "android.speech.extra.BIASING_STRINGS"
+
+        /** Google's recognizer reports the chosen model under these keys. */
+        private const val EXTRA_ON_DEVICE = "android.speech.extra.IS_ON_DEVICE"
+        private const val EVENT_ON_DEVICE = 1
+
+        /** Reads on-device formatting options (SDK 34+), when supported. */
+        private const val EXTRA_ENABLE_ON_DEVICE_OPTIONS =
+            "android.speech.extra.ENABLE_ON_DEVICE_RECOGNITION_OPTIONS"
+
+        private const val MAX_BIASING_TERMS = 24
     }
 }
 

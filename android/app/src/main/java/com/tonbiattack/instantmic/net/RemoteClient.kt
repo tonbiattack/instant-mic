@@ -151,8 +151,12 @@ class RemoteClient(
     private suspend fun <T> withTimeoutOrNull(ms: Long, block: suspend () -> T): T? =
         kotlinx.coroutines.withTimeoutOrNull(ms) { block() }
     /** Sends literal text. Returns the receiver's acknowledgment. */
-    suspend fun sendText(text: String, operationId: String = OperationIds.next()): DeliveryResult =
-        send(TextMessage(operationId, text).toJson(), operationId)
+    suspend fun sendText(
+        text: String,
+        operationId: String = OperationIds.next(),
+        /** True for a settled phrase of a longer utterance: never a command. */
+        literal: Boolean = false,
+    ): DeliveryResult = send(TextMessage(operationId, text, literal).toJson(), operationId)
 
     /** Sends a fixed key sequence. Returns the receiver's acknowledgment. */
     suspend fun sendKey(

@@ -5,6 +5,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.tonbiattack.instantmic.domain.CustomCommands
+import com.tonbiattack.instantmic.speech.IncrementalMode
+import com.tonbiattack.instantmic.speech.RecognitionEngine
+import com.tonbiattack.instantmic.speech.SilenceMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -33,6 +36,14 @@ data class Settings(
     val continuousListening: Boolean = true,
     val hapticsEnabled: Boolean = true,
     val autoStartListening: Boolean = false,
+    /** Which speech service to ask Android for. */
+    val recognitionEngine: RecognitionEngine = RecognitionEngine.OnDevice,
+    /** How long to wait for silence before ending an utterance. */
+    val silenceMode: SilenceMode = SilenceMode.Standard,
+    /** Whether settled phrases are typed while the user is still speaking. */
+    val incrementalMode: IncrementalMode = IncrementalMode.Off,
+    /** Whether the built-in development-term dictionary is applied. */
+    val termDictionary: Boolean = true,
 ) {
     companion object {
         val Empty = Settings(pairing = null, lastText = "")
@@ -56,6 +67,10 @@ class SettingsRepository(private val context: Context) {
         val continuousListening = stringPreferencesKey("continuous_listening")
         val haptics = stringPreferencesKey("haptics_enabled")
         val autoStart = stringPreferencesKey("auto_start_listening")
+        val recognitionEngine = stringPreferencesKey("recognition_engine")
+        val silenceMode = stringPreferencesKey("silence_mode")
+        val incrementalMode = stringPreferencesKey("incremental_mode")
+        val termDictionary = stringPreferencesKey("term_dictionary")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -69,6 +84,10 @@ class SettingsRepository(private val context: Context) {
             continuousListening = prefs[Keys.continuousListening]?.toBooleanStrictOrNull() ?: true,
             hapticsEnabled = prefs[Keys.haptics]?.toBooleanStrictOrNull() ?: true,
             autoStartListening = prefs[Keys.autoStart]?.toBooleanStrictOrNull() ?: false,
+            recognitionEngine = RecognitionEngine.fromStorage(prefs[Keys.recognitionEngine]),
+            silenceMode = SilenceMode.fromStorage(prefs[Keys.silenceMode]),
+            incrementalMode = IncrementalMode.fromStorage(prefs[Keys.incrementalMode]),
+            termDictionary = prefs[Keys.termDictionary]?.toBooleanStrictOrNull() ?: true,
         )
         if (token.isEmpty() || host.isEmpty()) {
             extras
@@ -121,6 +140,22 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setAutoStartListening(enabled: Boolean) {
         context.dataStore.edit { it[Keys.autoStart] = enabled.toString() }
+    }
+
+    suspend fun setRecognitionEngine(engine: RecognitionEngine) {
+        context.dataStore.edit { it[Keys.recognitionEngine] = engine.name }
+    }
+
+    suspend fun setSilenceMode(mode: SilenceMode) {
+        context.dataStore.edit { it[Keys.silenceMode] = mode.name }
+    }
+
+    suspend fun setIncrementalMode(mode: IncrementalMode) {
+        context.dataStore.edit { it[Keys.incrementalMode] = mode.name }
+    }
+
+    suspend fun setTermDictionary(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.termDictionary] = enabled.toString() }
     }
 
     suspend fun clearPairing() {

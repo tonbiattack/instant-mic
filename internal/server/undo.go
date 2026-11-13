@@ -14,6 +14,10 @@ type undo struct {
 	count int
 }
 
+// maxUndoCount matches the text length limit, so accumulated incremental
+// phrases can never ask for an unbounded erase.
+const maxUndoCount = 4000
+
 func newUndo() *undo { return &undo{} }
 
 // recordText remembers that count characters were just typed.
@@ -24,6 +28,20 @@ func (u *undo) recordText(count int) {
 		count = 0
 	}
 	u.count = count
+}
+
+// addText extends the record by count characters, so an utterance typed as
+// several incremental phrases can still be undone as one insertion.
+func (u *undo) addText(count int) {
+	if count <= 0 {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.count += count
+	if u.count > maxUndoCount {
+		u.count = maxUndoCount
+	}
 }
 
 // invalidate forgets the record after an action the receiver cannot measure.

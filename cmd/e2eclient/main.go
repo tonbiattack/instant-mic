@@ -27,7 +27,8 @@ func main() {
 	code := flag.String("code", "", "pairing code")
 	qr := flag.String("qr", "", "pairing QR payload (copied from the console)")
 	discover := flag.Bool("discover", false, "list receivers advertised on the LAN and exit")
-	text := flag.String("text", "", "text to send")
+	text := flag.String("text", "", "text to send (separate chunks with |)")
+	literal := flag.Bool("literal", false, "send text as settled phrases that are never commands")
 	key := flag.String("key", "", "key to send")
 	useTLS := flag.Bool("tls", true, "use HTTPS/WSS")
 	tokenFile := flag.String("token-file", "", "reuse/remember the device token here")
@@ -128,7 +129,8 @@ func main() {
 	if *text != "" {
 		for i, chunk := range strings.Split(*text, "|") {
 			id := fmt.Sprintf("e2e-%d-%d", time.Now().UnixNano(), i)
-			if err := ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: id, Text: chunk}); err != nil {
+			msg := protocol.Text{Type: protocol.TypeText, ID: id, Text: chunk, Literal: *literal}
+			if err := ws.WriteJSON(msg); err != nil {
 				fail("text: %v", err)
 			}
 			ack := readAck(ws)

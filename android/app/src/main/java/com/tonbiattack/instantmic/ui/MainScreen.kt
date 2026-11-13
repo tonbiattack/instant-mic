@@ -56,6 +56,10 @@ import com.tonbiattack.instantmic.domain.KeySequence
 import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.ReconnectPolicy
+import com.tonbiattack.instantmic.speech.IncrementalMode
+import com.tonbiattack.instantmic.speech.RecognitionAlternative
+import com.tonbiattack.instantmic.speech.RecognitionEngine
+import com.tonbiattack.instantmic.speech.SilenceMode
 import com.tonbiattack.instantmic.speech.SpeechState
 import com.tonbiattack.instantmic.speech.isActive
 
@@ -72,6 +76,7 @@ object TestTags {
     const val COMMAND_PHRASE = "command_phrase"
     const val COMMAND_SEQUENCE = "command_sequence"
     const val COMMAND_SAVE = "command_save"
+    const val LIVE_TRANSCRIPT = "live_transcript"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -132,6 +137,10 @@ fun MainScreen(
                     onContinuousChange = viewModel::setContinuousListening,
                     onHapticsChange = viewModel::setHapticsEnabled,
                     onAutoStartChange = viewModel::setAutoStartListening,
+                    onEngineChange = viewModel::setRecognitionEngine,
+                    onSilenceChange = viewModel::setSilenceMode,
+                    onIncrementalChange = viewModel::setIncrementalMode,
+                    onTermDictionaryChange = viewModel::setTermDictionary,
                 )
             } else {
                 val repair = state.needsRepair
@@ -154,6 +163,7 @@ fun MainScreen(
                         if (!state.microphoneGranted) onRequestMicrophone() else viewModel.toggleListening()
                     },
                 )
+                LiveTranscriptPanel(state, onChoose = viewModel::chooseAlternative, onDismiss = viewModel::dismissAlternatives)
                 ActionStatus(state, onDismiss = viewModel::dismissAction)
                 CapabilityNotice(state)
                 Spacer(Modifier.height(24.dp))
@@ -419,6 +429,55 @@ private fun transcriptLine(transcript: String, action: LastAction): String {
     return "認識: $shown"
 }
 
+/** Shows live recognition, what has been typed so far, and alternative readings. */
+@Composable
+private fun LiveTranscriptPanel(
+    state: UiState,
+    onChoose: (RecognitionAlternative) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val live = state.liveTranscript?.text?.takeIf { it.isNotBlank() }
+    val progress = state.incrementalProgress
+    val alternatives = state.alternatives
+    if (live == null && progress.isBlank() && alternatives.isEmpty()) return
+
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (live != null) {
+                Text("聞き取り中", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    live,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(TestTags.LIVE_TRANSCRIPT),
+                )
+            }
+            if (progress.isNotBlank()) {
+                Text(
+                    "PCへ入力済み: $progress",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            if (alternatives.isNotEmpty()) {
+                Text("別の認識候補（実行はしません）", style = MaterialTheme.typography.labelMedium)
+                for (alternative in alternatives) {
+                    TextButton(onClick = { onChoose(alternative) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            buildString {
+                                append(alternative.text)
+                                alternative.confidence?.let { append("  (${(it * 100).toInt()}%)") }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("候補を閉じる") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
     val action = state.lastAction
@@ -437,6 +496,29 @@ private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
         is LastAction.NoCommand -> "音声が空でした。もう一度話してください。" to true
         is LastAction.UnknownCommand ->
             "未対応のコマンドです。キー操作は行いませんでした: ${action.raw}" to true
+        is LastAction.Revision ->
+            "入力済みの部分を認識結果が修正しました。PCの文を確認してください: ${action.preview.take(60)}" to true
+    }
+    if (action is LastAction.Revision) {
+        // A revision means the PC may hold text the user did not say: say so
+        // explicitly instead of looking like a normal success message.
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Column(Modifier.padding(start = 14.dp, top = 8.dp, end = 4.dp, bottom = 8.dp)) {
+                Text(
+                    "入力済みの部分を認識結果が修正しました。PCの文を確認してください。",
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(TestTags.ACTION_STATUS),
+                )
+                Text(
+                    action.preview.take(80),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = onDismiss) { Text("閉じる") }
+            }
+        }
+        return
     }
     Card(
         colors = CardDefaults.cardColors(
@@ -483,6 +565,27 @@ private fun CapabilityNotice(state: UiState) {
         "この端末では音声認識がクラウドで処理される可能性があります。音声ファイルはアプリ内に保存しません。"
     }
     Text(message, style = MaterialTheme.typography.bodySmall)
+    state.capability.serviceName?.let { service ->
+        Text(
+            "使用中の認識サービス: $service",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    // The hints are advisory, so report what the service actually chose when it
+    // tells us. A mismatch explains why a setting seemed to do nothing.
+    val heard = state.onDeviceHeard ?: return
+    val actual = if (heard) "端末内" else "ネットワーク"
+    val hintIgnored = heard != (state.recognitionEngine == RecognitionEngine.OnDevice)
+    Text(
+        if (hintIgnored) {
+            "直前の認識は「$actual」で処理されました。設定（${state.recognitionEngine.label}）は認識サービスに無視されることがあります。"
+        } else {
+            "直前の認識は「$actual」で処理されました。"
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = if (hintIgnored) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -494,6 +597,10 @@ private fun CommandsPanel(
     onContinuousChange: (Boolean) -> Unit,
     onHapticsChange: (Boolean) -> Unit,
     onAutoStartChange: (Boolean) -> Unit,
+    onEngineChange: (RecognitionEngine) -> Unit,
+    onSilenceChange: (SilenceMode) -> Unit,
+    onIncrementalChange: (IncrementalMode) -> Unit,
+    onTermDictionaryChange: (Boolean) -> Unit,
 ) {
     // The editor state lives here so a list row can load itself into the fields.
     var phrase by rememberSaveable { mutableStateOf("") }
@@ -525,6 +632,67 @@ private fun CommandsPanel(
             checked = state.autoStartListening,
             onChange = onAutoStartChange,
         )
+
+        Spacer(Modifier.height(8.dp))
+        Text("音声認識の精度", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "同じ発話でも、認識方式や辞書によって誤変換の数が変わります。切り替えたら同じ文を読み上げて比べてください。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text("認識方式", style = MaterialTheme.typography.titleSmall)
+        for (engine in RecognitionEngine.entries) {
+            ChoiceRow(
+                label = engine.label,
+                description = when (engine) {
+                    RecognitionEngine.OnDevice ->
+                        "音声を端末内で処理します。対応端末では速く、通信も不要です（オフライン指定が無視される場合があります）。"
+                    RecognitionEngine.System ->
+                        "Android の既定サービスを使います。ネットワーク認識の方が精度が高いことがあります（音声が送信されます）。"
+                },
+                selected = state.recognitionEngine == engine,
+                onClick = { onEngineChange(engine) },
+            )
+        }
+
+        Text("話し終わりまでの待ち時間", style = MaterialTheme.typography.titleSmall)
+        for (mode in SilenceMode.entries) {
+            ChoiceRow(
+                label = mode.label,
+                description = when (mode) {
+                    SilenceMode.Fast -> "短い間で確定します。短文向け。"
+                    SilenceMode.Standard -> "既定。およそ1.2秒の無音で確定します。"
+                    SilenceMode.Relaxed -> "長めに待つので、考えながら話しても途中で切れにくくなります。"
+                },
+                selected = state.silenceMode == mode,
+                onClick = { onSilenceChange(mode) },
+            )
+        }
+
+        SettingSwitch(
+            title = "開発用語の辞書",
+            description = "GitHub・Codex・SQL・Go などの誤変換を直します。URL・コード・数字は変更しません。",
+            checked = state.termDictionary,
+            onChange = onTermDictionaryChange,
+        )
+
+        Spacer(Modifier.height(8.dp))
+        Text("入力の反映", style = MaterialTheme.typography.titleLarge)
+        for (mode in IncrementalMode.entries) {
+            ChoiceRow(
+                label = when (mode) {
+                    IncrementalMode.Off -> "確定してから入力（既定）"
+                    IncrementalMode.StablePrefixes -> "区切りごとに早めに入力"
+                },
+                description = when (mode) {
+                    IncrementalMode.Off ->
+                        "発話が終わって確定したテキストだけをPCへ送ります。最も安全です。"
+                    IncrementalMode.StablePrefixes ->
+                        "文の区切り（。！？、長い句読点）ごとにPCへ入力します。認識結果が後から変わった場合は追加入力せず、画面に確認を出します。コマンドは確定結果だけで実行します。"
+                },
+                selected = state.incrementalMode == mode,
+                onClick = { onIncrementalChange(mode) },
+            )
+        }
 
         Spacer(Modifier.height(4.dp))
         Text("カスタム音声コマンド", style = MaterialTheme.typography.titleLarge)
@@ -622,6 +790,41 @@ private fun SettingSwitch(
                 Text(description, style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+        }
+    }
+}
+
+@Composable
+private fun ChoiceRow(
+    label: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.secondaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    (if (selected) "● " else "○ ") + label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                )
+                Text(description, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }

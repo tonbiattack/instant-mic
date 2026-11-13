@@ -247,19 +247,39 @@ func (c *conn) handleText(data []byte) {
 	result := speech.Interpret(msg.Text)
 	start := time.Now()
 	var res AckResult
-	if result.Kind == speech.KindErase {
+	switch {
+	case msg.Literal:
+		// The client says this is a settled phrase of a longer utterance, not a
+		// complete one, so it must never be treated as a command. A phrase that
+		// starts with the wake prefix is refused outright: the phone kept
+		// incremental input off for commands, so this means the two sides
+		// disagree and typing it could duplicate the final result.
+		if err := validateLiteral(msg.Text); err != nil {
+			res = AckResult{OK: false, Error: err.Error()}
+		} else if err := c.srv.inserter.InsertText(msg.Text); err != nil {
+			res = AckResult{OK: false, Error: humanInputError(err)}
+		} else {
+			res = AckResult{OK: true, Applied: "text"}
+		}
+	case result.Kind == speech.KindErase:
 		// A spoken "言い直し" arrives as text, so it uses the same undo record
 		// as an explicit erase message.
 		res = c.applyErase()
-	} else {
+	default:
 		res = c.srv.apply(result)
 	}
 	elapsed := time.Since(start).Milliseconds()
 
 	// A successful literal insertion is the only thing "言い直し" may remove.
 	// Anything else changes the target in ways the receiver cannot measure.
-	if res.OK && result.Kind == speech.KindText {
-		c.undo.recordText(len([]rune(result.Text)))
+	if res.OK && (msg.Literal || result.Kind == speech.KindText) {
+		// An incremental phrase continues the same insertion, so its length
+		// accumulates until a key action or an undo closes the record.
+		if msg.Literal {
+			c.undo.addText(len([]rune(msg.Text)))
+		} else {
+			c.undo.recordText(len([]rune(result.Text)))
+		}
 	} else if res.OK {
 		c.undo.invalidate()
 	}
