@@ -18,7 +18,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -50,14 +49,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeySequence
 import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionState
+import com.tonbiattack.instantmic.net.ReconnectPolicy
 import com.tonbiattack.instantmic.speech.SpeechState
 import com.tonbiattack.instantmic.speech.isActive
 
@@ -122,6 +120,8 @@ fun MainScreen(
                     onPair = viewModel::pair,
                     onDismissError = viewModel::clearPairingError,
                     onQRScanned = viewModel::pairWithQR,
+                    onConfirmPending = viewModel::confirmPendingPairing,
+                    onDismissPending = viewModel::dismissPendingPairing,
                 )
             } else if (showCommands) {
                 CommandsPanel(
@@ -729,6 +729,8 @@ private fun PairingPanel(
     onPair: (String, String, String, String?) -> Unit,
     onDismissError: () -> Unit,
     onQRScanned: (String) -> Unit,
+    onConfirmPending: () -> Unit,
+    onDismissPending: () -> Unit,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("8765") }
@@ -736,23 +738,7 @@ private fun PairingPanel(
     var fingerprint by rememberSaveable { mutableStateOf("") }
     var manual by rememberSaveable { mutableStateOf(false) }
 
-    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val contents = result.contents
-        if (contents.isNullOrBlank()) {
-            // Cancelled: keep the pairing screen, nothing to report.
-            return@rememberLauncherForActivityResult
-        }
-        onQRScanned(contents)
-    }
-    val launchScanner = {
-        val options = ScanOptions().apply {
-            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            setPrompt("PCに表示されたQRコードを読み取ります")
-            setBeepEnabled(false)
-            setOrientationLocked(false)
-        }
-        scanner.launch(options)
-    }
+    val launchScanner = rememberQrScanner(onScanned = onQRScanned)
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.titleLarge)
@@ -760,6 +746,34 @@ private fun PairingPanel(
             "PCで受信アプリを起動し [p] を押すと、QRコードが表示されます。読み取るだけで接続できます。",
             style = MaterialTheme.typography.bodyMedium,
         )
+
+        val pending = state.pendingPairing
+        if (pending != null) {
+            // A link from another app's scanner: confirm before pairing, since
+            // any app can open a URI.
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "QRコードのペアリング先",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "${pending.serverName}\n${pending.host}:${pending.port}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "証明書: ${ReconnectPolicy.shortFingerprint(pending.fingerprint)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onConfirmPending, enabled = !state.pairingInProgress) {
+                            Text("このPCとペアリング")
+                        }
+                        OutlinedButton(onClick = onDismissPending) { Text("キャンセル") }
+                    }
+                }
+            }
+        }
 
         Button(
             onClick = launchScanner,

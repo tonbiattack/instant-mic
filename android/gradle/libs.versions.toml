@@ -10,6 +10,8 @@ coroutines = "1.10.2"
 okhttp = "4.12.0"
 junit = "4.13.2"
 zxing = "4.3.0"
+codeScanner = "16.1.0"
+fragmentKtx = "1.8.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -29,6 +31,8 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 json = { group = "org.json", name = "json", version = "20240303" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing" }
+play-services-code-scanner = { group = "com.google.android.gms", name = "play-services-code-scanner", version.ref = "codeScanner" }
+androidx-fragment-ktx = { group = "androidx.fragment", name = "fragment-ktx", version.ref = "fragmentKtx" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -75,6 +75,12 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
+    // Google Code Scanner: a system-provided, fast scanner that needs no camera
+    // permission. ZXing stays as a fallback for devices without Play services.
+    implementation(libs.play.services.code.scanner)
+    // Code Scanner pulls in an ancient Fragment via Play services; Activity Result
+    // needs at least 1.3.0.
+    implementation(libs.androidx.fragment.ktx)
     implementation(libs.zxing.android.embedded)
 
     testImplementation(libs.junit)

@@ -76,6 +76,8 @@ data class UiState(
     val discovery: DiscoveryState = DiscoveryState.Off,
     val needsRepair: String? = null,
     val qrScanInProgress: Boolean = false,
+    /** A QR scanned by another app, waiting for the user's confirmation. */
+    val pendingPairing: PairingPayload? = null,
 ) {
     val commandHint: String
         get() = "「コマンド、送信」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
@@ -245,7 +247,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
+        startQrPairing(payload)
+    }
 
+    /**
+     * Queues a payload that arrived through a link from another app.
+     *
+     * The user confirms it first: a link can be opened by any app, so pairing is
+     * never started without an explicit tap on this screen.
+     */
+    fun setPendingPairingPayload(payload: PairingPayload) {
+        if (payload.isExpired()) {
+            _ui.value = _ui.value.copy(
+                pairingError = "QRコードの有効期限が切れています。PC側で [p] を押して表示し直してください。",
+                pendingPairing = null,
+            )
+            return
+        }
+        _ui.value = _ui.value.copy(pendingPairing = payload, pairingError = null)
+    }
+
+    fun confirmPendingPairing() {
+        val payload = _ui.value.pendingPairing ?: return
+        _ui.value = _ui.value.copy(pendingPairing = null)
+        startQrPairing(payload)
+    }
+
+    fun dismissPendingPairing() {
+        _ui.value = _ui.value.copy(pendingPairing = null)
+    }
+
+    private fun startQrPairing(payload: PairingPayload) {
         _ui.value = _ui.value.copy(pairingInProgress = true, pairingError = null, qrScanInProgress = false)
         viewModelScope.launch {
             try {
