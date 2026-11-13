@@ -43,6 +43,18 @@ class TextShaperTest {
     }
 
     @Test
+    fun `coding symbols convert only as whole words`() {
+        assertEquals("_", TextShaper.shape("あんだーすこあ"))
+        assertEquals("@", TextShaper.shape("はいろふん"))
+        assertEquals("[]", TextShaper.shape("かっこはな"))
+        assertEquals("{}", TextShaper.shape("かっこなみ"))
+        // Longest match wins: かっこはな must not fall back to かっこ.
+        assertEquals("()", TextShaper.shape("かっこまる"))
+        // Mid-word occurrences stay untouched.
+        assertEquals("ぷらすの", TextShaper.shape("ぷらすの"))
+    }
+
+    @Test
     fun `changed reports whether shaping has an effect`() {
         assertTrue(TextShaper.changed("こんにちはまる"))
         assertFalse(TextShaper.changed("こんにちは"))

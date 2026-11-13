@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.tonbiattack.instantmic.domain.CustomCommands
+import com.tonbiattack.instantmic.domain.TermDictionary
 import com.tonbiattack.instantmic.speech.IncrementalMode
 import com.tonbiattack.instantmic.speech.RecognitionEngine
 import com.tonbiattack.instantmic.speech.SilenceMode
@@ -51,6 +52,8 @@ data class Settings(
      * choice is the main source of errors, and an LLM reads hiragana fine.
      */
     val hiraganaOutput: Boolean = false,
+    /** Terms the user added to the dictionary, on top of the built-in list. */
+    val userTerms: List<TermDictionary.Term> = emptyList(),
 ) {
     companion object {
         val Empty = Settings(pairing = null, lastText = "")
@@ -79,6 +82,7 @@ class SettingsRepository(private val context: Context) {
         val incrementalMode = stringPreferencesKey("incremental_mode")
         val termDictionary = stringPreferencesKey("term_dictionary")
         val hiraganaOutput = stringPreferencesKey("hiragana_output")
+        val userTerms = stringPreferencesKey("user_terms")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -97,6 +101,7 @@ class SettingsRepository(private val context: Context) {
             incrementalMode = IncrementalMode.fromStorage(prefs[Keys.incrementalMode]),
             termDictionary = prefs[Keys.termDictionary]?.toBooleanStrictOrNull() ?: true,
             hiraganaOutput = prefs[Keys.hiraganaOutput]?.toBooleanStrictOrNull() ?: false,
+            userTerms = decodeTerms(prefs[Keys.userTerms]),
         )
         if (token.isEmpty() || host.isEmpty()) {
             extras
@@ -169,6 +174,31 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHiraganaOutput(enabled: Boolean) {
         context.dataStore.edit { it[Keys.hiraganaOutput] = enabled.toString() }
+    }
+
+    suspend fun saveUserTerms(terms: List<TermDictionary.Term>) {
+        context.dataStore.edit { it[Keys.userTerms] = encodeTerms(terms) }
+    }
+
+    /**
+     * User terms are stored as `text<TAB>mishearing` lines.
+     *
+     * A simple format keeps the file readable and avoids pulling a JSON
+     * dependency into the data layer for two strings.
+     */
+    private fun encodeTerms(terms: List<TermDictionary.Term>): String =
+        terms.joinToString("\n") { "${it.text}\t${it.mishearings.joinToString(",")}" }
+
+    private fun decodeTerms(raw: String?): List<TermDictionary.Term> {
+        if (raw.isNullOrEmpty()) return emptyList()
+        return raw.lineSequence().mapNotNull { line ->
+            val parts = line.split('\t', limit = 2)
+            if (parts.size != 2) return@mapNotNull null
+            val text = parts[0]
+            val mishearings = parts[1].split(',').filter { it.isNotEmpty() }
+            if (text.isEmpty() || mishearings.isEmpty()) return@mapNotNull null
+            TermDictionary.Term(text, mishearings, fixCase = true, userDefined = true)
+        }.toList()
     }
 
     suspend fun clearPairing() {

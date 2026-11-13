@@ -38,6 +38,8 @@ import com.tonbiattack.instantmic.speech.isActive
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -106,6 +108,10 @@ data class UiState(
     val termDictionary: Boolean = true,
     /** Write dictated text in hiragana instead of kanji. */
     val hiraganaOutput: Boolean = false,
+    /** Terms the user added to the dictionary. */
+    val userTerms: List<TermDictionary.Term> = emptyList(),
+    /** Validation message for the dictionary editor. */
+    val termEditorError: String? = null,
     /** Text typed so far in the current utterance by incremental sending. */
     val incrementalProgress: String = "",
 ) {
@@ -124,6 +130,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val pairingClient = PairingClient()
     private val haptics = Haptics(app)
     private val discoveryClient = DiscoveryClient(app)
+
+    init {
+        // The dictionary is large, so its first load must not happen while the
+        // user is waiting for their first sentence. Warm it on a background
+        // thread; until it is ready the converter falls back to kana folding.
+        viewModelScope.launch(Dispatchers.Default) {
+            KanaConverter.shared.available
+        }
+    }
 
     private val discovery = DiscoveryCoordinator(
         discovery = discoveryClient,
@@ -152,6 +167,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Orders settled phrases and final results into one consumer. */
     private val eventQueue = SpeechEventQueue()
 
+    /** Delay before the undo text is written, so one utterance writes once. */
+    private companion object {
+        const val LAST_TEXT_SAVE_DELAY_MS = 400L
+    }
+
+    /**
+     * Writes the undo text when the phone is idle, coalesced.
+     *
+     * Saving on every phrase would write the whole string to DataStore
+     * repeatedly during one utterance, which shows up as input lag. Only the
+     * last value matters, so intermediate writes are dropped.
+     */
+    private var lastTextSaveJob: Job? = null
+
     private val _ui = MutableStateFlow(UiState(hapticsAvailable = haptics.supported))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
@@ -171,6 +200,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     incrementalMode = stored.incrementalMode,
                     termDictionary = stored.termDictionary,
                     hiraganaOutput = stored.hiraganaOutput,
+                    userTerms = stored.userTerms,
                 )
                 speech.setContinuous(stored.continuousListening)
                 speech.updateOptions(recognitionOptions())
@@ -353,6 +383,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setHiraganaOutput(enabled: Boolean) {
         _ui.value = _ui.value.copy(hiraganaOutput = enabled)
         viewModelScope.launch { settings.setHiraganaOutput(enabled) }
+    }
+
+    /**
+     * Adds or replaces a user dictionary term.
+     *
+     * Returns an error message for the UI, or null on success. A term with the
+     * same text replaces the built-in one, so a wrong built-in hint can be
+     * corrected without an app update.
+     */
+    fun saveUserTerm(text: String, mishearing: String): String? {
+        val error = TermDictionary.validateTerm(text, mishearing)
+        if (error != null) return error
+        val term = TermDictionary.Term(
+            text = text.trim(),
+            mishearings = listOf(mishearing.trim()),
+            fixCase = true,
+            userDefined = true,
+        )
+        // Merge with an existing user entry for the same term, so a term can
+        // have several mishearings.
+        val existing = _ui.value.userTerms.firstOrNull { it.text == term.text }
+        val merged = if (existing != null) {
+            term.copy(mishearings = (existing.mishearings + term.mishearings).distinct())
+        } else {
+            term
+        }
+        val updated = _ui.value.userTerms.filterNot { it.text == term.text } + merged
+        _ui.value = _ui.value.copy(userTerms = updated, termEditorError = null)
+        viewModelScope.launch { settings.saveUserTerms(updated) }
+        speech.updateOptions(recognitionOptions())
+        return null
+    }
+
+    fun deleteUserTerm(text: String) {
+        val updated = _ui.value.userTerms.filterNot { it.text == text }
+        _ui.value = _ui.value.copy(userTerms = updated)
+        viewModelScope.launch { settings.saveUserTerms(updated) }
+        speech.updateOptions(recognitionOptions())
+    }
+
+    fun setTermEditorError(message: String?) {
+        _ui.value = _ui.value.copy(termEditorError = message)
     }
 
     /**
@@ -649,7 +721,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Applies the development-term dictionary to literal text only. */
     private fun shape(text: String): String =
-        if (_ui.value.termDictionary) TermDictionary.correct(text) else text
+        if (_ui.value.termDictionary) {
+            TermDictionary.correct(text, TermDictionary.withUserTerms(_ui.value.userTerms))
+        } else {
+            text
+        }
+
+    /**
+     * Persists the undo text without blocking the send path.
+     *
+     * Coalesced so one utterance writes once, not once per phrase.
+     */
+    private fun persistLastText(text: String) {
+        lastTextSaveJob?.cancel()
+        lastTextSaveJob = viewModelScope.launch {
+            delay(LAST_TEXT_SAVE_DELAY_MS)
+            settings.saveLastText(text)
+        }
+    }
 
     /** Applies dictionary and punctuation shaping to a whole final utterance. */
     private fun shapeFinal(text: String): String = shape(TextShaper.shape(text))
@@ -706,7 +795,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (result.ok || result.duplicate) {
             handler.noteAcknowledged(shaped)
             val combined = _ui.value.lastText + text
-            settings.saveLastText(combined)
+            persistLastText(combined)
             _ui.value = _ui.value.copy(
                 lastText = combined,
                 busy = false,
@@ -727,14 +816,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Sends literal text.
+     * Sends literal text and applies the result.
+     *
+     * Called only from the single speech-event consumer, so text and key
+     * operations can never reach the receiver out of order.
      *
      * [continuePrevious] means this text is the tail of an utterance whose
      * earlier phrases were already typed, so the undo record must accumulate
      * instead of being replaced; otherwise 「言い直し」 would only remove the
      * tail.
      */
-    private fun sendText(text: String, literal: Boolean = false, continuePrevious: Boolean = false) {
+    private suspend fun sendText(text: String, literal: Boolean = false, continuePrevious: Boolean = false) {
         if (text.length > CommandParser.MAX_TEXT_LENGTH) {
             _ui.value = _ui.value.copy(
                 lastAction = LastAction.Failed(text.take(40), "文字数が多すぎます（${CommandParser.MAX_TEXT_LENGTH}文字まで）"),
@@ -742,40 +834,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(text), busy = true)
-        viewModelScope.launch {
-            val result = remote.sendText(text, literal = literal)
-            if (result.ok || result.duplicate) {
-                val combined = if (continuePrevious) _ui.value.lastText + text else text
-                settings.saveLastText(combined)
-                _ui.value = _ui.value.copy(lastText = combined, busy = false, lastAction = describe(result, text))
+        val result = remote.sendText(text, literal = literal)
+        if (result.ok || result.duplicate) {
+            val combined = if (continuePrevious) _ui.value.lastText + text else text
+            // The undo record keeps only what the receiver can still remove, and
+            // it must not grow without bound as an utterance gets longer.
+            val capped = if (combined.length > CommandParser.MAX_TEXT_LENGTH) {
+                combined.takeLast(CommandParser.MAX_TEXT_LENGTH)
             } else {
-                // The text is not in the document, so the undo record is
-                // unchanged.
-                _ui.value = _ui.value.copy(busy = false, lastAction = describe(result, text))
+                combined
             }
+            _ui.value = _ui.value.copy(lastText = capped, busy = false, lastAction = describe(result, text))
+            persistLastText(capped)
+        } else {
+            // The text is not in the document, so the undo record must not claim
+            // it: the receiver would reject the following 「言い直し」 because the
+            // counts differ.
+            _ui.value = _ui.value.copy(busy = false, lastAction = describe(result, text))
         }
     }
 
-    private fun sendKey(command: KeyCommand, transcript: String) {
+    private suspend fun sendKey(command: KeyCommand, transcript: String) {
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(transcript), busy = true)
-        viewModelScope.launch {
-            val result = remote.sendKey(command.wire, count = command.count)
-            val ok = result.ok || result.duplicate
-            if (ok) {
-                // A key action moves the caret or edits text, so the previous
-                // insertion can no longer be undone.
-                settings.saveLastText("")
-            }
-            _ui.value = _ui.value.copy(
-                busy = false,
-                lastText = if (ok) "" else _ui.value.lastText,
-                lastAction = if (ok) {
-                    LastAction.KeySent(command, result.elapsedMs, transcript)
-                } else {
-                    LastAction.Failed(transcript, result.error ?: "キー操作に失敗しました")
-                },
-            )
+        val result = remote.sendKey(command.wire, count = command.count)
+        val ok = result.ok || result.duplicate
+        if (ok) {
+            // A key action moves the caret or edits text, so the previous
+            // insertion can no longer be undone.
+            persistLastText("")
         }
+        _ui.value = _ui.value.copy(
+            busy = false,
+            lastText = if (ok) "" else _ui.value.lastText,
+            lastAction = if (ok) {
+                LastAction.KeySent(command, result.elapsedMs, transcript)
+            } else {
+                LastAction.Failed(transcript, result.error ?: "キー操作に失敗しました")
+            },
+        )
     }
 
     private fun describe(result: DeliveryResult, preview: String): LastAction = when {
@@ -791,7 +887,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * count against its own record, so a key command or another client in
      * between makes the erase fail instead of deleting the wrong amount.
      */
-    private fun sendErase() {
+    private suspend fun sendErase() {
         val last = _ui.value.lastText
         if (last.isEmpty()) {
             _ui.value = _ui.value.copy(
@@ -804,25 +900,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val count = last.codePointCount(0, last.length)
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending("言い直し"), busy = true)
-        viewModelScope.launch {
-            val result = remote.sendErase(count)
-            if (result.ok || result.duplicate) {
-                // The text is gone, so it must not be undone twice.
-                settings.saveLastText("")
-                _ui.value = _ui.value.copy(
-                    busy = false,
-                    lastText = "",
-                    lastAction = LastAction.Erased(count, result.elapsedMs),
-                )
-            } else {
-                _ui.value = _ui.value.copy(
-                    busy = false,
-                    lastAction = LastAction.Failed(
-                        "言い直し",
-                        result.error ?: "取り消しに失敗しました",
-                    ),
-                )
-            }
+        val result = remote.sendErase(count)
+        if (result.ok || result.duplicate) {
+            // The text is gone, so it must not be undone twice.
+            persistLastText("")
+            _ui.value = _ui.value.copy(
+                busy = false,
+                lastText = "",
+                lastAction = LastAction.Erased(count, result.elapsedMs),
+            )
+        } else {
+            _ui.value = _ui.value.copy(
+                busy = false,
+                lastAction = LastAction.Failed(
+                    "言い直し",
+                    result.error ?: "取り消しに失敗しました",
+                ),
+            )
         }
     }
 

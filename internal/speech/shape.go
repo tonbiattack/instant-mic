@@ -1,6 +1,9 @@
 package speech
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // punctuationWords maps a spoken punctuation word to the symbol it types.
 type punctuationWord struct {
@@ -28,6 +31,37 @@ var punctuationWords = []punctuationWord{
 	{spoken: "はてな", symbol: "？"},
 	{spoken: "まる", symbol: "。"},
 	{spoken: "てん", symbol: "、"},
+	// Coding symbols. These are for dictating code to an assistant; each is a
+	// word nobody says by accident in Japanese speech, and like every other
+	// standalone word it only converts at a boundary.
+	{spoken: "あんだーすこあ", symbol: "_"},
+	{spoken: "はいろふん", symbol: "@"},
+	{spoken: "ばっくくぉーと", symbol: "`"},
+	{spoken: "だぶるくぉーと", symbol: "\""},
+	{spoken: "ぱーせんと", symbol: "%"},
+	{spoken: "あんど", symbol: "&"},
+	{spoken: "ぱいぷ", symbol: "|"},
+	{spoken: "いこーる", symbol: "="},
+	{spoken: "ぷらす", symbol: "+"},
+	{spoken: "まいなす", symbol: "-"},
+	{spoken: "あすたりすく", symbol: "*"},
+	{spoken: "どる", symbol: "$"},
+	{spoken: "しゃーぷ", symbol: "#"},
+	{spoken: "はっしゅ", symbol: "#"},
+	{spoken: "ちるだ", symbol: "~"},
+	{spoken: "かっこまる", symbol: "()"},
+	{spoken: "かっこはな", symbol: "[]"},
+	{spoken: "かっこなみ", symbol: "{}"},
+}
+
+// init sorts the table longest-first so a shorter word can never win at a
+// position where a longer one starts ("かっこまる" before "かっこ"). Sorting
+// once here means a new entry cannot silently break the longest-match rule by
+// being appended in the wrong place.
+func init() {
+	sort.SliceStable(punctuationWords, func(i, j int) bool {
+		return len([]rune(punctuationWords[i].spoken)) > len([]rune(punctuationWords[j].spoken))
+	})
 }
 
 // ShapeText converts spoken punctuation at a safe boundary.

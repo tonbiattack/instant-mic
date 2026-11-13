@@ -37,8 +37,32 @@ func TestShapeTextDoesNotBreakWords(t *testing.T) {
 	}
 }
 
-func TestShapeTextNeedsBalancedBrackets(t *testing.T) {
-	// Unpaired bracket words stay literal so the text never becomes unbalanced.
+func TestShapeTextCodingSymbols(t *testing.T) {
+	// Coding symbols only convert as whole words at a boundary.
+	cases := map[string]string{
+		"あんだーすこあ": "_",
+		"はいろふん":   "@",
+		"ぱいぷ":     "|",
+		"いこーる":    "=",
+		"しゃーぷ":    "#",
+		"かっこはな":   "[]",
+		"かっこなみ":   "{}",
+		"かっこまる":   "()",
+	}
+	for in, want := range cases {
+		if got := ShapeText(in); got != want {
+			t.Errorf("ShapeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Mid-word occurrences must be left alone.
+	for _, in := range []string{"ぷらすの", "あんどで", "どるい"} {
+		if got := ShapeText(in); got != in {
+			t.Errorf("ShapeText(%q) = %q, want unchanged", in, got)
+		}
+	}
+}
+
+func TestShapeTextNeedsBalancedBrackets(t *testing.T) {	// Unpaired bracket words stay literal so the text never becomes unbalanced.
 	if got := ShapeText("かっこだけ"); got != "かっこだけ" {
 		t.Errorf("unpaired bracket shaped: %q", got)
 	}

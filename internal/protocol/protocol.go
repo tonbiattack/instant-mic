@@ -63,6 +63,22 @@ type Ready struct {
 	ServerTime  int64  `json:"serverTime"`
 	DeviceID    string `json:"deviceId"`
 	CommandPref string `json:"commandPrefix"`
+	// Target describes the window the receiver is about to type into, so the
+	// phone can show it instead of making the user guess. It is advisory: the
+	// focus may change at any moment, so the receiver re-checks before typing.
+	Target FocusTarget `json:"target"`
+}
+
+// FocusTarget is the foreground window at the moment the connection was
+// accepted. Empty fields mean the receiver could not identify one.
+type FocusTarget struct {
+	Title   string `json:"title,omitempty"`
+	Process string `json:"process,omitempty"`
+	// Ready is false when no window has keyboard focus, so typing would fail.
+	Ready bool `json:"ready"`
+	// Elevated is true when the target refuses input from a non-elevated
+	// process; the phone shows this so the user is not left guessing.
+	Elevated bool `json:"elevated,omitempty"`
 }
 
 // Text asks the receiver to type literal Unicode text into the focused window.

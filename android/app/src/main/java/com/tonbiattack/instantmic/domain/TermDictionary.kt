@@ -42,6 +42,8 @@ object TermDictionary {
          * text such as `go build` or `git status`.
          */
         val fixCase: Boolean = false,
+        /** True for a term the user added, so it can be removed again. */
+        val userDefined: Boolean = false,
     )
 
     /**
@@ -82,6 +84,44 @@ object TermDictionary {
 
     /** A matched span in the input, used by [correct]. */
     private data class Hit(val start: Int, val end: Int, val text: String)
+
+    /**
+     * Merges user-defined terms over the built-in list.
+     *
+     * A user term with the same canonical text replaces the built-in one, so a
+     * wrong built-in hint can be overridden without editing the app. Validation
+     * happens at the call site: the list is expected to be clean.
+     */
+    fun withUserTerms(userTerms: List<Term>): List<Term> {
+        if (userTerms.isEmpty()) return builtIn
+        val byText = LinkedHashMap<String, Term>()
+        for (term in builtIn) byText[term.text] = term
+        for (term in userTerms) byText[term.text] = term
+        return byText.values.toList()
+    }
+
+    /**
+     * Validates a user entry.
+     *
+     * The text must look like a term rather than a sentence, and a mishearing
+     * must be non-empty and different from the term, because an empty
+     * mishearing would rewrite every position.
+     */
+    fun validateTerm(text: String, mishearing: String): String? {
+        val term = text.trim()
+        val spoken = mishearing.trim()
+        return when {
+            term.isEmpty() -> "正式な表記を入力してください"
+            term.length > 40 -> "正式な表記が長すぎます（40文字まで）"
+            spoken.isEmpty() -> "誤って認識される表記を入力してください"
+            spoken == term -> "2つの表記が同じです"
+            // An ASCII mishearing would be rewritten inside code and URLs, which
+            // the whole dictionary is designed not to touch.
+            spoken.all { it.code < 128 } -> "誤認識の表記は日本語で入力してください（英数字はコードを壊すため対象外です）"
+            term.contains('\n') || spoken.contains('\n') -> "改行は登録できません"
+            else -> null
+        }
+    }
 
     /** Words to hand to the recognizer as a vocabulary hint. */
     fun biasingPhrases(terms: List<Term> = builtIn, limit: Int = 24): List<String> {
