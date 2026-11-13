@@ -8,8 +8,11 @@ import (
 // RenderQR draws a QR module grid with block characters.
 //
 // The console UI uses this instead of an image so the code is visible over SSH,
-// in Windows Terminal, and in a redirected log. Each module is two characters
-// wide so the result is roughly square in a monospace font.
+// in Windows Terminal, and in a redirected log. One module is one character
+// wide and half a character tall (two modules share a cell via upper/lower half
+// blocks), which keeps modules roughly square in a monospace font while keeping
+// the whole code to about a quarter of the area of a two-character-per-module
+// rendering.
 func RenderQR(modules [][]bool, border int) []string {
 	if len(modules) == 0 {
 		return nil
@@ -18,25 +21,37 @@ func RenderQR(modules [][]bool, border int) []string {
 		border = 0
 	}
 	width := len(modules[0])
-	lines := make([]string, 0, len(modules)+border*2)
+	rows := (len(modules) + 1) / 2
+	lines := make([]string, 0, rows+border*2)
 
-	blank := strings.Repeat("  ", width+border*2)
+	blank := strings.Repeat(" ", width+border*2)
 	for i := 0; i < border; i++ {
 		lines = append(lines, blank)
 	}
-	for _, row := range modules {
+	for r := 0; r < rows; r++ {
+		top := modules[r*2]
+		var bottom []bool
+		if r*2+1 < len(modules) {
+			bottom = modules[r*2+1]
+		}
 		var b strings.Builder
-		b.Grow((len(row) + border*2) * 3)
-		b.WriteString(strings.Repeat("  ", border))
-		for _, dark := range row {
-			if dark {
-				// Full block twice renders as a solid 2x1 module.
-				b.WriteString("\u2588\u2588")
-			} else {
-				b.WriteString("  ")
+		b.Grow(width + border*2)
+		b.WriteString(strings.Repeat(" ", border))
+		for x := 0; x < width; x++ {
+			upper := x < len(top) && top[x]
+			lower := x < len(bottom) && bottom[x]
+			switch {
+			case upper && lower:
+				b.WriteString("\u2588") // both halves dark
+			case upper:
+				b.WriteString("\u2580") // upper half dark
+			case lower:
+				b.WriteString("\u2584") // lower half dark
+			default:
+				b.WriteString(" ")
 			}
 		}
-		b.WriteString(strings.Repeat("  ", border))
+		b.WriteString(strings.Repeat(" ", border))
 		lines = append(lines, b.String())
 	}
 	for i := 0; i < border; i++ {

@@ -81,20 +81,30 @@ func TestQRPayloadExpiry(t *testing.T) {
 }
 
 func TestQRModulesRender(t *testing.T) {
-	lines := RenderQR(samplePayload().QRModules(), 1)
+	modules := samplePayload().QRModules()
+	lines := RenderQR(modules, 1)
 	if len(lines) < 20 {
 		t.Fatalf("rendered %d lines", len(lines))
 	}
+	// Two module rows share one text line, so the code stays roughly square
+	// and small enough to read on a normal console.
+	if want := (len(modules)+1)/2 + 2; len(lines) != want {
+		t.Fatalf("rendered %d lines, want %d for %d module rows", len(lines), want, len(modules))
+	}
 	width := -1
 	for _, line := range lines {
-		// Each module is two runes, so every line must be the same length.
+		// Each module is one rune, so every line must be the same length.
 		if n := len([]rune(line)); width < 0 {
 			width = n
 		} else if n != width {
 			t.Fatalf("ragged QR: %d != %d", n, width)
 		}
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "\u2588") {
+	if want := len(modules[0]) + 2; width != want {
+		t.Fatalf("rendered %d columns, want %d", width, want)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.ContainsAny(joined, "\u2580\u2584\u2588") {
 		t.Fatal("QR contains no dark modules")
 	}
 }
