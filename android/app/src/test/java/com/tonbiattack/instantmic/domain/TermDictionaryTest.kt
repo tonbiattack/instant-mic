@@ -69,6 +69,48 @@ class TermDictionaryTest {
     }
 
     @Test
+    fun `a later long match does not skip an earlier one`() {
+        // Regression from a real device: "github のプルリクエスト" kept the ASCII
+        // case because the longer Pull Request match was applied first.
+        assertEquals(
+            "GitHub のPull Requestを確認",
+            TermDictionary.correct("github のプルリクエストを確認"),
+        )
+    }
+
+    @Test
+    fun `ascii case is restored for product names`() {
+        assertEquals("GitHubのPull Request", TermDictionary.correct("githubのPull Request"))
+        assertEquals("TypeScriptとJavaScript", TermDictionary.correct("typescriptとjavascript"))
+        assertEquals("SQLを直す", TermDictionary.correct("sqlを直す"))
+    }
+
+    @Test
+    fun `ascii case is not forced on shell or everyday terms`() {
+        // `go build` and `git status` are real commands, not product names.
+        assertEquals("go build ./...", TermDictionary.correct("go build ./..."))
+        assertEquals("git status を実行", TermDictionary.correct("git status を実行"))
+        assertEquals("commit しておく", TermDictionary.correct("commit しておく"))
+    }
+
+    @Test
+    fun `ascii case is not restored inside identifiers or urls`() {
+        assertEquals("https://github.com/tonbiattack", TermDictionary.correct("https://github.com/tonbiattack"))
+        assertEquals("my_github_token と github.com", TermDictionary.correct("my_github_token と github.com"))
+        assertEquals("`github` を読む", TermDictionary.correct("`github` を読む"))
+        assertEquals("--github オプション", TermDictionary.correct("--github オプション"))
+    }
+
+    @Test
+    fun `a mishearing inside a longer katakana word is not replaced`() {
+        // Real-device regression: "レビュー" became "レVue".
+        assertEquals("レビューします", TermDictionary.correct("レビューします"))
+        assertEquals("プレビューを開く", TermDictionary.correct("プレビューを開く"))
+        // A standalone word still converts.
+        assertEquals("Vueを使う", TermDictionary.correct("ビューを使う"))
+    }
+
+    @Test
     fun `dictionary can be disabled by passing no terms`() {
         assertEquals("ギットハブ", TermDictionary.correct("ギットハブ", terms = emptyList()))
     }

@@ -47,8 +47,11 @@ class UtteranceHandler(
 
     /** Records a phrase the recognizer settled on, before it is sent. */
     fun notePhrase(phrase: String) {
+        // The recognizer's interim text is cumulative, and a phrase is only
+        // emitted once (the sender removes it from later interims), so the
+        // concatenation here is exactly the full utterance so far.
         if (looksLikeCommand(emitted + phrase)) sawCommand = true
-        if (autoAcknowledge) noteAcknowledged(TextShaper.shape(phrase))
+        if (autoAcknowledge) noteAcknowledged(phrase)
     }
 
     /** Records that the receiver accepted [text]. */

@@ -141,6 +141,7 @@ fun MainScreen(
                     onSilenceChange = viewModel::setSilenceMode,
                     onIncrementalChange = viewModel::setIncrementalMode,
                     onTermDictionaryChange = viewModel::setTermDictionary,
+                    onHiraganaChange = viewModel::setHiraganaOutput,
                 )
             } else {
                 val repair = state.needsRepair
@@ -601,6 +602,7 @@ private fun CommandsPanel(
     onSilenceChange: (SilenceMode) -> Unit,
     onIncrementalChange: (IncrementalMode) -> Unit,
     onTermDictionaryChange: (Boolean) -> Unit,
+    onHiraganaChange: (Boolean) -> Unit,
 ) {
     // The editor state lives here so a list row can load itself into the fields.
     var phrase by rememberSaveable { mutableStateOf("") }
@@ -673,6 +675,13 @@ private fun CommandsPanel(
             description = "GitHub・Codex・SQL・Go などの誤変換を直します。URL・コード・数字は変更しません。",
             checked = state.termDictionary,
             onChange = onTermDictionaryChange,
+        )
+
+        SettingSwitch(
+            title = "ひらがなで入力する",
+            description = "漢字に変換せず、読みのまま入力します（「改行」と「開業」のような変換ミスがなくなります）。AI への指示書き向け。英数字・URL・記号はそのまま残ります。",
+            checked = state.hiraganaOutput,
+            onChange = onHiraganaChange,
         )
 
         Spacer(Modifier.height(8.dp))

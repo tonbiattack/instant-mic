@@ -8,6 +8,7 @@ lifecycle = "2.9.4"
 datastore = "1.1.7"
 coroutines = "1.10.2"
 okhttp = "4.12.0"
+kuromoji = "0.9.0"
 junit = "4.13.2"
 zxing = "4.3.0"
 codeScanner = "16.1.0"
@@ -28,6 +29,9 @@ androidx-datastore-preferences = { group = "androidx.datastore", name = "datasto
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+# Japanese morphological analyser; used only to convert kanji to kana when the
+# user opts in. The dictionary is bundled (about 13 MB of compressed text).
+kuromoji = { group = "com.atilika.kuromoji", name = "kuromoji-ipadic", version.ref = "kuromoji" }
 json = { group = "org.json", name = "json", version = "20240303" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing" }

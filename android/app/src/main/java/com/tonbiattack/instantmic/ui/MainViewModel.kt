@@ -7,6 +7,7 @@ import com.tonbiattack.instantmic.domain.CommandParser
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeyCommand
+import com.tonbiattack.instantmic.domain.KanaConverter
 import com.tonbiattack.instantmic.domain.TermDictionary
 import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionPlanner
@@ -103,6 +104,8 @@ data class UiState(
     val silenceMode: SilenceMode = SilenceMode.Standard,
     val incrementalMode: IncrementalMode = IncrementalMode.Off,
     val termDictionary: Boolean = true,
+    /** Write dictated text in hiragana instead of kanji. */
+    val hiraganaOutput: Boolean = false,
     /** Text typed so far in the current utterance by incremental sending. */
     val incrementalProgress: String = "",
 ) {
@@ -167,6 +170,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     silenceMode = stored.silenceMode,
                     incrementalMode = stored.incrementalMode,
                     termDictionary = stored.termDictionary,
+                    hiraganaOutput = stored.hiraganaOutput,
                 )
                 speech.setContinuous(stored.continuousListening)
                 speech.updateOptions(recognitionOptions())
@@ -344,6 +348,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(termDictionary = enabled)
         viewModelScope.launch { settings.setTermDictionary(enabled) }
         speech.updateOptions(recognitionOptions())
+    }
+
+    fun setHiraganaOutput(enabled: Boolean) {
+        _ui.value = _ui.value.copy(hiraganaOutput = enabled)
+        viewModelScope.launch { settings.setHiraganaOutput(enabled) }
     }
 
     /**
@@ -600,7 +609,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // The utterance is already half typed, so the tail is typed
                     // literally: it must not turn into a command now. The undo
                     // record continues the same insertion.
-                    sendText(shapeFinal(result.text), literal = true, continuePrevious = true)
+                    sendText(toKanaIfEnabled(shapeFinal(result.text)), literal = true, continuePrevious = true)
                     return
                 }
 
@@ -621,7 +630,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.value = _ui.value.copy(lastAction = LastAction.NoCommand(transcript.text))
             }
 
-            is CommandParser.Result.Text -> sendText(shapeFinal(result.text))
+            is CommandParser.Result.Text -> sendText(toKanaIfEnabled(shapeFinal(result.text)))
 
             is CommandParser.Result.Key -> sendKey(result.command, transcript.text)
 
@@ -644,6 +653,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Applies dictionary and punctuation shaping to a whole final utterance. */
     private fun shapeFinal(text: String): String = shape(TextShaper.shape(text))
+
+    /**
+     * Final step before sending: optional hiragana conversion.
+     *
+     * The analyser loads its dictionary lazily, so this runs off the main thread
+     * and falls back to the input unchanged if it is not ready. Order matters:
+     * the dictionary must correct kanji/katakana spellings first, because the
+     * converter then produces the reading of the corrected word.
+     */
+    private suspend fun toKanaIfEnabled(text: String): String {
+        if (!_ui.value.hiraganaOutput) return text
+        return withContext(Dispatchers.Default) {
+            try {
+                KanaConverter.shared.convert(text)
+            } catch (e: Exception) {
+                text
+            }
+        }
+    }
 
     /**
      * Types one settled phrase of the live transcript.
@@ -670,10 +698,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         // Phrases are already shaped by the recognizer side; the dictionary is
         // applied per phrase so a term split across phrases is rarely missed.
-        val text = shape(raw)
+        // The undo/revision bookkeeping stays in the shaped (kanji) form so the
+        // final result compares equal; only what is sent is converted.
+        val shaped = shape(raw)
+        val text = toKanaIfEnabled(shaped)
         val result = remote.sendText(text, literal = true)
         if (result.ok || result.duplicate) {
-            handler.noteAcknowledged(text)
+            handler.noteAcknowledged(shaped)
             val combined = _ui.value.lastText + text
             settings.saveLastText(combined)
             _ui.value = _ui.value.copy(
