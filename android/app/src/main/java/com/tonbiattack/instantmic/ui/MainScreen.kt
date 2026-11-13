@@ -146,6 +146,7 @@ fun MainScreen(
                     onHiraganaChange = viewModel::setHiraganaOutput,
                     onSaveTerm = viewModel::saveUserTerm,
                     onDeleteTerm = viewModel::deleteUserTerm,
+                    onConfirmChange = viewModel::setConfirmDestructive,
                 )
             } else {
                 val repair = state.needsRepair
@@ -169,7 +170,12 @@ fun MainScreen(
                     },
                 )
                 LiveTranscriptPanel(state, onChoose = viewModel::chooseAlternative, onDismiss = viewModel::dismissAlternatives)
-                ActionStatus(state, onDismiss = viewModel::dismissAction)
+                ActionStatus(
+                    state,
+                    onDismiss = viewModel::dismissAction,
+                    onConfirmCommand = viewModel::confirmPendingCommand,
+                    onCancelCommand = viewModel::cancelPendingCommand,
+                )
                 CapabilityNotice(state)
                 Spacer(Modifier.height(24.dp))
             }
@@ -498,7 +504,12 @@ private fun LiveTranscriptPanel(
 }
 
 @Composable
-private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
+private fun ActionStatus(
+    state: UiState,
+    onDismiss: () -> Unit,
+    onConfirmCommand: () -> Unit,
+    onCancelCommand: () -> Unit,
+) {
     val action = state.lastAction
     if (action is LastAction.None) return
     val (text, isError) = when (action) {
@@ -517,6 +528,28 @@ private fun ActionStatus(state: UiState, onDismiss: () -> Unit) {
             "未対応のコマンドです。キー操作は行いませんでした: ${action.raw}" to true
         is LastAction.Revision ->
             "入力済みの部分を認識結果が修正しました。PCの文を確認してください: ${action.preview.take(60)}" to true
+        is LastAction.ConfirmCommand ->
+            "「${action.command.label}」を実行しますか？" to false
+    }
+    if (action is LastAction.ConfirmCommand) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "「${action.command.label}」を実行しますか？",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(TestTags.ACTION_STATUS),
+                )
+                Text(
+                    "誤って送信・削除するのを防ぐため、確認しています。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onConfirmCommand) { Text("実行する") }
+                    OutlinedButton(onClick = onCancelCommand) { Text("やめる") }
+                }
+            }
+        }
+        return
     }
     if (action is LastAction.Revision) {
         // A revision means the PC may hold text the user did not say: say so
@@ -623,6 +656,7 @@ private fun CommandsPanel(
     onHiraganaChange: (Boolean) -> Unit,
     onSaveTerm: (String, String) -> String?,
     onDeleteTerm: (String) -> Unit,
+    onConfirmChange: (Boolean) -> Unit,
 ) {
     // The editor state lives here so a list row can load itself into the fields.
     var phrase by rememberSaveable { mutableStateOf("") }
@@ -653,6 +687,13 @@ private fun CommandsPanel(
             description = "アプリを開いた時点で聞き取りを始めます。Quick Settings のタイルからも開始できます。",
             checked = state.autoStartListening,
             onChange = onAutoStartChange,
+        )
+
+        SettingSwitch(
+            title = "送信・削除の前に確認する",
+            description = "「コマンド、送信」「削除」などを実行する前に確認ボタンを出します。AI チャットへの誤送信を防ぎます。既定はオフ（すぐ実行）。",
+            checked = state.confirmDestructive,
+            onChange = onConfirmChange,
         )
 
         Spacer(Modifier.height(8.dp))
