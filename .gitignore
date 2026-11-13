@@ -16,6 +16,18 @@ android/**/build/
 android/captures/
 android/.kotlin/
 
+# Objective-C
+*.h
+*.m
+*.mm
+
+# Signing keys: never commit. The release build reads them from the environment.
+*.jks
+*.keystore
+*.p12
+*.pfx
+release.jks
+
 # OS / editor
 .DS_Store
 Thumbs.db

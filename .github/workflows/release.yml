@@ -1,0 +1,239 @@
+name: Release
+
+# Builds and publishes the Windows receiver and the Android APK.
+#
+# Two ways to run:
+#   - push a tag v*      : builds, then publishes the release automatically
+#   - manual dispatch    : builds and uploads a DRAFT release for inspection
+#
+# Nothing is published unless every build step succeeded: the release job only
+# runs after both build jobs finish, so a failed build can never leave a
+# half-filled release behind.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the draft (e.g. v0.1.0)"
+        required: false
+        default: "v0.1.0-draft"
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.v.outputs.name }}
+      code: ${{ steps.v.outputs.code }}
+      draft: ${{ steps.v.outputs.draft }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            name="${{ inputs.version }}"
+            draft="true"
+          else
+            name="${GITHUB_REF_NAME}"
+            draft="false"
+          fi
+          # Android requires a monotonically increasing integer. Derive it from
+          # the semantic part of the tag: v1.2.3 -> 10203.
+          semver="${name#v}"
+          semver="${semver%%-*}"
+          major="$(echo "$semver" | cut -d. -f1)"
+          minor="$(echo "$semver" | cut -d. -f2)"
+          patch="$(echo "$semver" | cut -d. -f3)"
+          major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+          code=$(( major * 10000 + minor * 100 + patch ))
+          if [ "$code" -le 0 ]; then code=1; fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          echo "resolved $name (code $code)"
+
+  windows:
+    name: Windows receiver
+    runs-on: windows-latest
+    needs: version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Build
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.name }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # -trimpath and -s -w keep the binary small and strip local paths, so
+          # the shipped exe does not leak the build machine's directory layout.
+          go build -trimpath -ldflags "-s -w" -o dist/instant-mic.exe ./cmd/instant-mic
+          if (-not (Test-Path dist/instant-mic.exe)) { throw "build produced no exe" }
+          Copy-Item README.md dist/README.md
+          Copy-Item scripts/e2e-target.ps1 dist/e2e-target.ps1
+          @"
+          instant-mic receiver $env:VERSION
+
+          1. 右クリック → プロパティ → 「ブロックの解除」にチェック（Windows の警告を消す）
+          2. instant-mic.exe を実行する
+          3. 通知領域のアイコンを右クリック →「ペアリングを開始」で QR を表示
+          4. Android アプリで QR を読み取る
+          5. 接続できない場合は、Windows ファイアウォールで許可する
+
+          設定は %AppData%\instant-mic\config.json に保存されます。
+          終了するときは通知領域のアイコンから「終了」を選んでください。
+          "@ | Set-Content -Encoding utf8 dist/はじめにお読みください.txt
+          Compress-Archive -Path dist/* -DestinationPath instant-mic-windows-amd64.zip -Force
+          $hash = (Get-FileHash instant-mic-windows-amd64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  instant-mic-windows-amd64.zip" | Set-Content -Encoding ascii instant-mic-windows-amd64.zip.sha256
+          Get-Content instant-mic-windows-amd64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            instant-mic-windows-amd64.zip
+            instant-mic-windows-amd64.zip.sha256
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    needs: version
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest lintDebug
+      - name: Decode signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.INSTANT_MIC_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::INSTANT_MIC_KEYSTORE_BASE64 が未設定です。署名済み APK を作れません。"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+          ls -l "$RUNNER_TEMP/signing/release.jks"
+      - name: Build signed release APK
+        env:
+          INSTANT_MIC_KEYSTORE: ${{ runner.temp }}/signing/release.jks
+          INSTANT_MIC_KEYSTORE_PASSWORD: ${{ secrets.INSTANT_MIC_KEYSTORE_PASSWORD }}
+          INSTANT_MIC_KEY_ALIAS: ${{ secrets.INSTANT_MIC_KEY_ALIAS }}
+          INSTANT_MIC_KEY_PASSWORD: ${{ secrets.INSTANT_MIC_KEY_PASSWORD }}
+          INSTANT_MIC_VERSION_NAME: ${{ needs.version.outputs.name }}
+          INSTANT_MIC_VERSION_CODE: ${{ needs.version.outputs.code }}
+        run: ./gradlew assembleRelease
+      - name: Verify the APK is signed
+        env:
+          INSTANT_MIC_VERSION_NAME: ${{ needs.version.outputs.name }}
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          if [ -z "$APK" ]; then echo "::error::APK が見つかりません"; exit 1; fi
+          # Reject the unsigned artifact: shipping one would make every later
+          # update fail with a signature mismatch on users' phones.
+          case "$APK" in *unsigned*) echo "::error::未署名の APK です: $APK"; exit 1;; esac
+          BT=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort | tail -n1)
+          "$BT/apksigner" verify --print-certs "$APK"
+          cp "$APK" "../instant-mic-android.apk"
+          cd ..
+          sha256sum instant-mic-android.apk > instant-mic-android.apk.sha256
+          cat instant-mic-android.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            instant-mic-android.apk
+            instant-mic-android.apk.sha256
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [version, windows, android]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build release notes
+        id: notes
+        env:
+          NAME: ${{ needs.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Instant Mic $NAME"
+            echo
+            echo "### 対応環境"
+            echo
+            echo "| 配布物 | 対象 |"
+            echo "| --- | --- |"
+            echo "| \`instant-mic-windows-amd64.zip\` | Windows 10/11 (x64) |"
+            echo "| \`instant-mic-android.apk\` | Android 8.0 (API 26) 以上 |"
+            echo
+            echo "### インストール"
+            echo
+            echo "**Windows**: ZIP を展開し、\`instant-mic.exe\` を実行します。初回はプロパティから「ブロックの解除」を選んでください。"
+            echo
+            echo "**Android**: APK を開き、提供元不明アプリのインストールを許可してから実行します。"
+            echo "**このリリースから取得した APK のみをインストールしてください。**"
+            echo
+            echo "### ペアリング"
+            echo
+            echo "1. Windows の通知領域のアイコンを右クリック →「ペアリングを開始」"
+            echo "2. Android アプリで「QRコードを読み取る」"
+            echo "3. 以後は自動で再接続します"
+            echo
+            echo "### チェックサム (SHA-256)"
+            echo
+            echo '```'
+            cat artifacts/windows/*.sha256 artifacts/android/*.sha256
+            echo '```'
+            echo
+            echo "### 変更点"
+            echo
+            prev="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty=format:'- %s' "$prev"..HEAD
+            else
+              git log --no-merges --pretty=format:'- %s' -20
+            fi
+            echo
+          } > notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAME: ${{ needs.version.outputs.name }}
+          DRAFT: ${{ needs.version.outputs.draft }}
+        run: |
+          set -euo pipefail
+          args=("$NAME" artifacts/windows/* artifacts/android/* --title "$NAME" --notes-file notes.md)
+          if [ "$DRAFT" = "true" ]; then
+            args+=(--draft)
+          fi
+          gh release create "${args[@]}"

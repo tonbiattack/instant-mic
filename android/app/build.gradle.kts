@@ -6,6 +6,27 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Release signing is configured entirely from the environment so that no key or
+// password can ever be committed. CI supplies these from GitHub Actions
+// secrets; a local build without them simply produces an unsigned release
+// (which cannot be installed over another signature).
+val releaseKeystorePath: String? = System.getenv("INSTANT_MIC_KEYSTORE")
+val releaseKeystorePassword: String? = System.getenv("INSTANT_MIC_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = System.getenv("INSTANT_MIC_KEY_ALIAS")
+val releaseKeyPassword: String? = System.getenv("INSTANT_MIC_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() } && file(releaseKeystorePath!!).exists()
+
+/** Version code/name come from the git tag in CI, so every release is unique. */
+val releaseVersionName: String =
+    System.getenv("INSTANT_MIC_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.1.0"
+val releaseVersionCode: Int =
+    System.getenv("INSTANT_MIC_VERSION_CODE")?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.tonbiattack.instantmic"
     compileSdk = 36
@@ -15,21 +36,37 @@ android {
         applicationId = "com.tonbiattack.instantmic"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
 
         vectorDrawables {
             useSupportLibrary = true
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // Minification stays off: the app is small, and keeping the stack
+            // traces readable matters more than a few hundred KB here.
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
