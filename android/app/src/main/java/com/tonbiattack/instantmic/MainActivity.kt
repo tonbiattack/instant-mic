@@ -98,11 +98,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
+    override fun onResume() {
+        super.onResume()
+        // Returning to the screen resumes the loop if it was running when the
+        // user left. Background recording stays out of scope: nothing is
+        // captured while another app is in front.
+        viewModel.resumeListeningIfNeeded()
+    }
+
+    override fun onStop() {
+        super.onStop()
         // Background recording is out of scope: stop cleanly so the loop cannot
         // keep the microphone (or the battery) busy behind another app.
-        viewModel.stopListening()
+        //
+        // Stopping in onStop rather than onPause keeps the session alive through
+        // a transient overlay such as the microphone permission dialog or the
+        // keyboard picker, which pause the activity without leaving the screen.
+        // A configuration change (rotation) also reaches onStop, so it is
+        // excluded: the activity is being recreated, not backgrounded.
+        if (!isChangingConfigurations) {
+            viewModel.stopListening()
+        }
     }
 
     /**

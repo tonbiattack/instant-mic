@@ -69,6 +69,9 @@ sealed interface LastAction {
 
     /** Part of the utterance was typed, then the recognizer revised it. */
     data class Revision(val preview: String) : LastAction
+
+    /** A destructive command is waiting for a second tap. */
+    data class ConfirmCommand(val command: KeyCommand) : LastAction
 }
 
 data class UiState(
@@ -111,7 +114,13 @@ data class UiState(
     /** Terms the user added to the dictionary. */
     val userTerms: List<TermDictionary.Term> = emptyList(),
     /** Validation message for the dictionary editor. */
-    val termEditorError: String? = null,
+    val termEditorError: String? = null,    /**
+     * Ask before running a destructive command (Enter, delete, paste).
+     *
+     * Off by default so the existing one-shot behaviour is unchanged; worth
+     * turning on when typing into an AI chat where an accidental Enter sends.
+     */
+    val confirmDestructive: Boolean = false,
     /** Text typed so far in the current utterance by incremental sending. */
     val incrementalProgress: String = "",
 ) {
@@ -151,6 +160,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** True while the user asked for a connection this session. */
     private var autoConnectRequested = false
 
+    /** True when the loop was running and the screen went to the background. */
+    private var resumeOnReturn = false
+
     /**
      * Per-utterance state for incremental typing, or null when the current
      * utterance is not being sent phrase by phrase.
@@ -170,6 +182,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Delay before the undo text is written, so one utterance writes once. */
     private companion object {
         const val LAST_TEXT_SAVE_DELAY_MS = 400L
+
+        /** Grace period after the activity resumes before restarting the loop. */
+        const val RESUME_DELAY_MS = 350L
     }
 
     /**
@@ -201,6 +216,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     termDictionary = stored.termDictionary,
                     hiraganaOutput = stored.hiraganaOutput,
                     userTerms = stored.userTerms,
+                    confirmDestructive = stored.confirmDestructive,
                 )
                 speech.setContinuous(stored.continuousListening)
                 speech.updateOptions(recognitionOptions())
@@ -336,7 +352,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Explicit stop, also used when the activity goes to the background. */
     fun stopListening() {
+        // Remember that the user had the loop on, so returning to the screen can
+        // resume it. Background recording is out of scope, so this is the only
+        // way "tap the tile, look something up, come back" stays quick.
+        resumeOnReturn = speech.state.value.isActive
         speech.cancel()
+    }
+
+    /**
+     * Restarts listening after the activity came back to the foreground.
+     *
+     * Only when the user had it running and did not stop it themselves: an
+     * explicit stop must stay stopped.
+     */
+    fun resumeListeningIfNeeded() {
+        if (!resumeOnReturn) return
+        resumeOnReturn = false
+        if (!_ui.value.microphoneGranted) return
+        if (speech.state.value.isActive) return
+        viewModelScope.launch {
+            // Give the recognizer a moment; starting during a resume can fail.
+            delay(RESUME_DELAY_MS)
+            if (!_ui.value.microphoneGranted) return@launch
+            if (speech.state.value.isActive) return@launch
+            speech.start(recognitionOptions())
+        }
     }
 
     fun cancelListening() {
@@ -425,6 +465,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setTermEditorError(message: String?) {
         _ui.value = _ui.value.copy(termEditorError = message)
+    }
+
+    /** Runs a destructive command the user explicitly confirmed. */
+    fun confirmPendingCommand() {
+        val pending = _ui.value.lastAction as? LastAction.ConfirmCommand ?: return
+        _ui.value = _ui.value.copy(lastAction = LastAction.None)
+        viewModelScope.launch { sendKey(pending.command, pending.command.label) }
+    }
+
+    /** Discards a destructive command without running it. */
+    fun cancelPendingCommand() {
+        val pending = _ui.value.lastAction as? LastAction.ConfirmCommand ?: return
+        _ui.value = _ui.value.copy(
+            lastAction = LastAction.Failed(pending.command.label, "コマンドを実行しませんでした"),
+        )
+    }
+
+    fun setConfirmDestructive(enabled: Boolean) {
+        _ui.value = _ui.value.copy(confirmDestructive = enabled)
+        viewModelScope.launch { settings.setConfirmDestructive(enabled) }
     }
 
     /**
@@ -855,6 +915,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun sendKey(command: KeyCommand, transcript: String) {
+        // A destructive command can be confirmed first. The pending command is
+        // kept in the UI state so the user confirms with a tap, not by speaking
+        // again (which the recognizer could mishear in the same way).
+        if (_ui.value.confirmDestructive && command.isDestructive) {
+            _ui.value = _ui.value.copy(lastAction = LastAction.ConfirmCommand(command))
+            return
+        }
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(transcript), busy = true)
         val result = remote.sendKey(command.wire, count = command.count)
         val ok = result.ok || result.duplicate

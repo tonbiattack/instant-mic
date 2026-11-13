@@ -54,6 +54,8 @@ data class Settings(
     val hiraganaOutput: Boolean = false,
     /** Terms the user added to the dictionary, on top of the built-in list. */
     val userTerms: List<TermDictionary.Term> = emptyList(),
+    /** Ask before running a destructive command. */
+    val confirmDestructive: Boolean = false,
 ) {
     companion object {
         val Empty = Settings(pairing = null, lastText = "")
@@ -83,6 +85,7 @@ class SettingsRepository(private val context: Context) {
         val termDictionary = stringPreferencesKey("term_dictionary")
         val hiraganaOutput = stringPreferencesKey("hiragana_output")
         val userTerms = stringPreferencesKey("user_terms")
+        val confirmDestructive = stringPreferencesKey("confirm_destructive")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -102,6 +105,7 @@ class SettingsRepository(private val context: Context) {
             termDictionary = prefs[Keys.termDictionary]?.toBooleanStrictOrNull() ?: true,
             hiraganaOutput = prefs[Keys.hiraganaOutput]?.toBooleanStrictOrNull() ?: false,
             userTerms = decodeTerms(prefs[Keys.userTerms]),
+            confirmDestructive = prefs[Keys.confirmDestructive]?.toBooleanStrictOrNull() ?: false,
         )
         if (token.isEmpty() || host.isEmpty()) {
             extras
@@ -174,6 +178,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHiraganaOutput(enabled: Boolean) {
         context.dataStore.edit { it[Keys.hiraganaOutput] = enabled.toString() }
+    }
+
+    suspend fun setConfirmDestructive(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.confirmDestructive] = enabled.toString() }
     }
 
     suspend fun saveUserTerms(terms: List<TermDictionary.Term>) {

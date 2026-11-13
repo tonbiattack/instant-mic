@@ -129,6 +129,26 @@ data class KeyCommand(
 
     fun repeated(times: Int): KeyCommand = copy(count = times.coerceIn(1, MAX_REPEAT))
 
+    /**
+     * True when running this command by accident is hard to undo.
+     *
+     * Sending (Enter), deleting text and overwriting the clipboard all change
+     * something the user may not notice in time. These are the commands worth
+     * asking about first when the setting is on.
+     */
+    val isDestructive: Boolean
+        get() {
+            val first = sequence.substringBefore('>').lowercase()
+            return when {
+                sequence.contains("delete") -> true
+                sequence.contains("backspace") -> true
+                sequence == "enter" -> true
+                sequence == "ctrl+v" || sequence == "ctrl+x" -> true
+                first == "enter" -> true
+                else -> false
+            }
+        }
+
     companion object {
         const val MAX_REPEAT = 5
 
