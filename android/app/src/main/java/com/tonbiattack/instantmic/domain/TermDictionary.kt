@@ -32,6 +32,16 @@ object TermDictionary {
     data class Term(
         val text: String,
         val mishearings: List<String> = emptyList(),
+        /**
+         * True when the recognizer may emit the term in ASCII with the wrong
+         * case (`github`, `typescript`) and the canonical casing should be
+         * restored.
+         *
+         * Off for words that are also ordinary English or shell terms
+         * (`go`, `git`, `commit`), where forcing a capital would corrupt real
+         * text such as `go build` or `git status`.
+         */
+        val fixCase: Boolean = false,
     )
 
     /**
@@ -39,27 +49,27 @@ object TermDictionary {
      * mishearings were observed with the system recognizer set to `ja-JP`.
      */
     val builtIn: List<Term> = listOf(
-        Term("GitHub", listOf("ギットハブ")),
+        Term("GitHub", listOf("ギットハブ"), fixCase = true),
         Term("Git", listOf("ギット")),
-        Term("Codex", listOf("コーデックス", "こーでっくす")),
-        Term("SQL", listOf("エスキューエル", "シーケル")),
-        Term("Nuxt", listOf("ヌクスト", "ナクスト")),
-        Term("Next.js", listOf("ネクストジェイエス", "ネクストjs")),
+        Term("Codex", listOf("コーデックス", "こーでっくす"), fixCase = true),
+        Term("SQL", listOf("エスキューエル", "シーケル"), fixCase = true),
+        Term("Nuxt", listOf("ヌクスト", "ナクスト"), fixCase = true),
+        Term("Next.js", listOf("ネクストジェイエス", "ネクストjs"), fixCase = true),
         Term("Vue", listOf("ビュー")),
         Term("React", listOf("リアクト")),
-        Term("TypeScript", listOf("タイプスクリプト")),
-        Term("JavaScript", listOf("ジャバスクリプト")),
-        Term("Python", listOf("パイソン")),
-        Term("Kotlin", listOf("コトリン")),
-        Term("Gradle", listOf("グレイドル")),
-        Term("Docker", listOf("ドッカー")),
-        Term("Kubernetes", listOf("クバネティス", "クーベネティス")),
-        Term("WebSocket", listOf("ウェブソケット")),
+        Term("TypeScript", listOf("タイプスクリプト"), fixCase = true),
+        Term("JavaScript", listOf("ジャバスクリプト"), fixCase = true),
+        Term("Python", listOf("パイソン"), fixCase = true),
+        Term("Kotlin", listOf("コトリン"), fixCase = true),
+        Term("Gradle", listOf("グレイドル"), fixCase = true),
+        Term("Docker", listOf("ドッカー"), fixCase = true),
+        Term("Kubernetes", listOf("クバネティス", "クーベネティス"), fixCase = true),
+        Term("WebSocket", listOf("ウェブソケット"), fixCase = true),
         Term("API", listOf("エーピーアイ")),
-        Term("JSON", listOf("ジェイソン", "ジェーソン")),
-        Term("YAML", listOf("ヤムル", "ヤメル")),
+        Term("JSON", listOf("ジェイソン", "ジェーソン"), fixCase = true),
+        Term("YAML", listOf("ヤムル", "ヤメル"), fixCase = true),
         Term("CI/CD", listOf("シーアイシーディー")),
-        Term("Pull Request", listOf("プルリクエスト")),
+        Term("Pull Request", listOf("プルリクエスト"), fixCase = true),
         Term("commit", listOf("コミット")),
         Term("merge", listOf("マージ")),
         Term("branch", listOf("ブランチ")),
@@ -105,11 +115,16 @@ object TermDictionary {
                     index = text.indexOf(spoken, index + 1)
                 }
             }
+            if (term.fixCase) {
+                candidates.addAll(caseHits(text, term, protectedRanges))
+            }
         }
         if (candidates.isEmpty()) return text
 
-        // Longest match first, then left to right; skip overlaps.
-        candidates.sortWith(compareByDescending<Hit> { it.end - it.start }.thenBy { it.start })
+        // Leftmost match first, and the longest one when two start together
+        // (「ギットハブ」 before 「ギット」). Sorting by length alone would apply a
+        // later long match first and skip everything to its left.
+        candidates.sortWith(compareBy<Hit> { it.start }.thenByDescending { it.end - it.start })
         val out = StringBuilder(text.length)
         var cursor = 0
         for (hit in candidates) {
@@ -126,22 +141,68 @@ object TermDictionary {
 
     private fun isAllowed(text: String, start: Int, end: Int, protectedRanges: List<IntRange>): Boolean {
         if (protectedRanges.any { start <= it.last && end - 1 >= it.first }) return false
-        if (!standsAlone(text.getOrNull(end))) return false
+        if (!standsAlone(text.getOrNull(start - 1), text.getOrNull(end))) return false
         // Used as a label ("API: …") or a path segment ("Go/…"): leave it.
         val next = text.getOrNull(end)
         if (next == ':' || next == '/') return false
         return true
     }
 
-    /** True when the character would glue the match into a longer word. */
-    private fun standsAlone(ch: Char?): Boolean {
-        // A mishearing that continues as katakana is part of a longer word:
-        // 「ゴー」 inside 「ゴール」, 「ギット」 inside 「ギットハブ」. Particles
-        // (に, と, を …) are hiragana, so ordinary sentences still match.
-        if (ch == null) return true
-        return !isKatakana(ch)
+    /**
+     * True when the match is a whole word rather than part of a longer
+     * katakana word.
+     *
+     * 「ビュー」 must not match inside 「レビュー」, and 「ゴー」 must not match
+     * inside 「ゴール」. Particles (に, と, を …) are hiragana, so an ordinary
+     * sentence still matches.
+     */
+    private fun standsAlone(before: Char?, after: Char?): Boolean {
+        if (before != null && isKatakana(before)) return false
+        if (after != null && isKatakana(after)) return false
+        return true
     }
 
+    /**
+     * Finds the term written in ASCII with the wrong case, e.g. `github`.
+     *
+     * The recognizer often emits a known product name in ASCII already, so the
+     * Japanese-mishearing rules never fire. Only exact case variants that touch
+     * a letter or digit boundary are matched, so URLs, paths, identifiers and
+     * inline code are excluded exactly like the other rules, and `github.com`
+     * or `--github` is never rewritten.
+     */
+    private fun caseHits(text: String, term: Term, protectedRanges: List<IntRange>): List<Hit> {
+        val canonical = term.text
+        // Only single-token, alphabetic-leading terms are safe to case-fold.
+        if (canonical.isEmpty() || !canonical[0].isLetter()) return emptyList()
+        if (canonical.any { it.isWhitespace() || it == '.' || it == '/' }) return emptyList()
+
+        val hits = mutableListOf<Hit>()
+        var index = text.indexOf(canonical, ignoreCase = true)
+        while (index >= 0) {
+            val end = index + canonical.length
+            val actual = text.substring(index, end)
+            if (actual != canonical && !touchesIdentifier(text, index, end)) {
+                if (!protectedRanges.any { index <= it.last && end - 1 >= it.first }) {
+                    hits.add(Hit(index, end, canonical))
+                }
+            }
+            index = text.indexOf(canonical, index + 1, ignoreCase = true)
+        }
+        return hits
+    }
+
+    /** True when [start, end) is part of a longer identifier, path or URL. */
+    private fun touchesIdentifier(text: String, start: Int, end: Int): Boolean {
+        // Only ASCII counts: a Japanese particle after the word is a sentence
+        // boundary, not part of an identifier ("githubの…" is plain speech).
+        fun isWordLike(ch: Char?): Boolean =
+            ch != null && ch.code < 128 &&
+                (ch.isLetterOrDigit() || ch == '_' || ch == '-' || ch == '.' || ch == '/')
+        return isWordLike(text.getOrNull(start - 1)) || isWordLike(text.getOrNull(end))
+    }
+
+    /** True when the character would glue the match into a longer word. */
     private fun isKatakana(ch: Char): Boolean =
         Character.UnicodeScript.of(ch.code) == Character.UnicodeScript.KATAKANA
 

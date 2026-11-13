@@ -46,6 +46,12 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // Kuromoji ships licence/notice files that collide with okhttp's.
+            excludes += "/META-INF/CONTRIBUTORS.md"
+            excludes += "/META-INF/LICENSE*"
+            excludes += "/META-INF/NOTICE*"
+            excludes += "/META-INF/DEPENDENCIES"
+            excludes += "/META-INF/*.kotlin_module"
         }
     }
 
@@ -75,6 +81,9 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
+    // Kanji-to-kana conversion for the optional "write everything in hiragana"
+    // mode. The analyser runs on the phone; audio never leaves it.
+    implementation(libs.kuromoji)
     // Google Code Scanner: a system-provided, fast scanner that needs no camera
     // permission. ZXing stays as a fallback for devices without Play services.
     implementation(libs.play.services.code.scanner)

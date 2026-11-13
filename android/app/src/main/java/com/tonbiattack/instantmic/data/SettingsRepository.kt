@@ -44,6 +44,13 @@ data class Settings(
     val incrementalMode: IncrementalMode = IncrementalMode.Off,
     /** Whether the built-in development-term dictionary is applied. */
     val termDictionary: Boolean = true,
+    /**
+     * Write dictated text in hiragana instead of kanji.
+     *
+     * Useful when the text goes to a coding assistant: the recognizer's kanji
+     * choice is the main source of errors, and an LLM reads hiragana fine.
+     */
+    val hiraganaOutput: Boolean = false,
 ) {
     companion object {
         val Empty = Settings(pairing = null, lastText = "")
@@ -71,6 +78,7 @@ class SettingsRepository(private val context: Context) {
         val silenceMode = stringPreferencesKey("silence_mode")
         val incrementalMode = stringPreferencesKey("incremental_mode")
         val termDictionary = stringPreferencesKey("term_dictionary")
+        val hiraganaOutput = stringPreferencesKey("hiragana_output")
     }
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -88,6 +96,7 @@ class SettingsRepository(private val context: Context) {
             silenceMode = SilenceMode.fromStorage(prefs[Keys.silenceMode]),
             incrementalMode = IncrementalMode.fromStorage(prefs[Keys.incrementalMode]),
             termDictionary = prefs[Keys.termDictionary]?.toBooleanStrictOrNull() ?: true,
+            hiraganaOutput = prefs[Keys.hiraganaOutput]?.toBooleanStrictOrNull() ?: false,
         )
         if (token.isEmpty() || host.isEmpty()) {
             extras
@@ -156,6 +165,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setTermDictionary(enabled: Boolean) {
         context.dataStore.edit { it[Keys.termDictionary] = enabled.toString() }
+    }
+
+    suspend fun setHiraganaOutput(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.hiraganaOutput] = enabled.toString() }
     }
 
     suspend fun clearPairing() {

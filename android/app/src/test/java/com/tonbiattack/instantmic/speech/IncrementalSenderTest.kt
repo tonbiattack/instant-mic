@@ -137,6 +137,42 @@ class IncrementalSenderTest {
     }
 
     @Test
+    fun `a tail can be flushed when the recognizer adds no punctuation`() {
+        val sender = IncrementalSender(minClauseRunes = 5)
+        // No 。 ever arrives while speaking, so without allowTail nothing is sent.
+        assertNull(sender.nextPhrase("今日は会議があります"))
+        assertEquals("今日は会議があります", sender.nextPhrase("今日は会議があります", allowTail = true))
+        assertEquals("今日は会議があります", sender.emitted)
+    }
+
+    @Test
+    fun `a tail is not flushed while it is still very short`() {
+        val sender = IncrementalSender(minClauseRunes = 30)
+        assertNull(sender.nextPhrase("今日", allowTail = true))
+    }
+
+    @Test
+    fun `a tail is not flushed inside an unclosed bracket`() {
+        val sender = IncrementalSender(minClauseRunes = 5)
+        assertNull(sender.nextPhrase("これはかっこです", allowTail = true))
+    }
+
+    @Test
+    fun `a tail cut still refuses a later revision`() {
+        val sender = IncrementalSender(minClauseRunes = 5)
+        assertEquals("今日は会議があります", sender.nextPhrase("今日は会議があります", allowTail = true))
+        assertNull(sender.nextPhrase("今日は会議がありました", allowTail = true))
+        assertTrue(sender.stopped)
+    }
+
+    @Test
+    fun `a tail flush continues after the sentence end`() {
+        val sender = IncrementalSender(minTailRunes = 3)
+        assertEquals("いちです。", sender.nextPhrase("いちです。にです"))
+        assertEquals("にです", sender.nextPhrase("いちです。にです", allowTail = true))
+    }
+
+    @Test
     fun `reset makes the sender reusable for the next utterance`() {
         val sender = IncrementalSender()
         sender.nextPhrase("いちです。")

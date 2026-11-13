@@ -146,6 +146,10 @@ class SpeechRecognizerController(
     /** Settled-phrase tracking for the current session, when enabled. */
     private var incremental: IncrementalSender? = null
 
+    /** Latest live text, and a timer that flushes it when speech pauses. */
+    private var latestPartial: String = ""
+    private var partialFlushJob: Job? = null
+
     /** True when the recognizer reported that it is using on-device ASR. */
     private var onDeviceSession: Boolean? = null
 
@@ -234,6 +238,9 @@ class SpeechRecognizerController(
         readyCueSent = false
         endCueSent = false
         incremental = null
+        latestPartial = ""
+        partialFlushJob?.cancel()
+        partialFlushJob = null
         val current = recognizer
         recognizer = null
         if (current != null) {
@@ -279,6 +286,9 @@ class SpeechRecognizerController(
         readyCueSent = false
         endCueSent = false
         onDeviceSession = null
+        latestPartial = ""
+        partialFlushJob?.cancel()
+        partialFlushJob = null
         incremental = if (options.incremental == IncrementalMode.StablePrefixes) {
             IncrementalSender()
         } else {
@@ -377,6 +387,32 @@ class SpeechRecognizerController(
         putBoolean("enable punctuation", true)
         putBoolean("enableSpokenPunctuation", true)
         putBoolean("enableSpokenEmojis", false)
+    }
+
+    /**
+     * Types the current interim once it has stopped changing.
+     *
+     * Some recognizers (including Google's on this phone) only add punctuation
+     * to the final result, so there is never a `。` to cut at while the user
+     * speaks. A pause is the remaining signal that a phrase is settled, and the
+     * caller's "no rewrite" rule still reports the case where the tail was
+     * revised afterwards.
+     */
+    private fun scheduleTailFlush(text: String) {
+        if (incremental == null) return
+        latestPartial = text
+        partialFlushJob?.cancel()
+        partialFlushJob = scope.launch {
+            delay(TAIL_FLUSH_DELAY_MS)
+            if (!running) return@launch
+            val sender = incremental ?: return@launch
+            val latest = latestPartial
+            if (latest.isEmpty()) return@launch
+            val phrase = sender.nextPhrase(latest, allowTail = true)
+            if (phrase != null && phrase.isNotBlank()) {
+                _phrases.tryEmit(PhraseEmitted(phrase, sessionId))
+            }
+        }
     }
 
     /**
@@ -504,15 +540,21 @@ class SpeechRecognizerController(
             _partials.tryEmit(LiveTranscript(text, sessionId))
 
             val sender = incremental ?: return
-            val phrase = sender.nextPhrase(text) ?: return
-            if (phrase.isNotBlank()) {
+            val phrase = sender.nextPhrase(text)
+            if (phrase != null && phrase.isNotBlank()) {
                 _phrases.tryEmit(PhraseEmitted(phrase, sessionId))
             }
+            scheduleTailFlush(text)
         }
 
         override fun onResults(results: Bundle?) {
             // A late result after the user stopped must not type anything.
             if (!running) return
+            // The final result replaces any pending tail: emitting it now would
+            // race with the final text.
+            partialFlushJob?.cancel()
+            partialFlushJob = null
+            latestPartial = ""
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
@@ -567,6 +609,18 @@ class SpeechRecognizerController(
             "android.speech.extra.ENABLE_ON_DEVICE_RECOGNITION_OPTIONS"
 
         private const val MAX_BIASING_TERMS = 24
+
+        /**
+         * How long the interim must stay unchanged before its tail is treated as
+         * settled.
+         *
+         * Google's recognizer emits an interim every ~200 ms while speech
+         * continues, so "no new interim" is a clean pause signal. A deliberate
+         * gap between sentences is usually longer than this; a shorter value
+         * would cut words in half, and a longer one rarely fires during normal
+         * speech.
+         */
+        private const val TAIL_FLUSH_DELAY_MS = 600L
     }
 }
 

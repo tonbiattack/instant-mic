@@ -53,6 +53,8 @@ class IncrementalSender(
     private val commandPrefix: String = CommandParser.DEFAULT_PREFIX,
     /** Minimum length for a *comma* cut; a finished sentence has no minimum. */
     private val minClauseRunes: Int = 30,
+    /** Minimum length for a pause-based tail cut, which has no boundary at all. */
+    private val minTailRunes: Int = 8,
 ) {
 
     /** Shaped text already sent; the prefix every later result must keep. */
@@ -71,8 +73,13 @@ class IncrementalSender(
     /**
      * Returns the shaped text to type now, or null when the interim does not
      * yet contain a settled chunk.
+     *
+     * [allowTail] relaxes the boundary rule for recognizers that only add
+     * punctuation to the final result: the end of the current interim is then
+     * treated as settled. The caller only passes true after the interim has
+     * stopped changing, so a half-recognized word is not cut in half.
      */
-    fun nextPhrase(partial: String): String? {
+    fun nextPhrase(partial: String, allowTail: Boolean = false): String? {
         if (stopped) return null
         val text = partial.trimStart()
         if (text.isEmpty()) return null
@@ -89,11 +96,17 @@ class IncrementalSender(
             return null
         }
 
-        val boundary = findBoundary(shaped) ?: return null
+        val boundary = findBoundary(shaped, emitted.length)
+        if (boundary == null) {
+            if (!allowTail) return null
+            // A tail cut is arbitrary, so demand enough text to be worth typing.
+            if (shaped.substring(emitted.length).trim().runes() < minTailRunes) return null
+        }
+        val cut = boundary ?: shaped.length
         // A spoken punctuation word at the very end of an interim may still
         // grow into a word (「まる」 → 「まるで」), so it is not settled yet.
-        if (boundary == shaped.length && endsWithSpokenPunctuation(text)) return null
-        val chunk = shaped.substring(0, boundary)
+        if (cut == shaped.length && endsWithSpokenPunctuation(text)) return null
+        val chunk = shaped.substring(0, cut)
         val delta = chunk.substring(emitted.length)
         if (delta.isBlank()) return null
         if (hasUnclosedBracket(chunk)) return null
@@ -133,14 +146,17 @@ class IncrementalSender(
     /**
      * Index just past the last usable boundary in the *shaped* text, or null.
      *
+     * Only text after [from] is considered, so a boundary that was already sent
+     * cannot be mistaken for new text.
+     *
      * Shaping already decides whether a spoken 「まる」 really is punctuation
      * (it is not when the word continues, e.g. 「まるで」), so this only has to
      * find sentence ends and, in long speech, a clause comma.
      */
-    private fun findBoundary(shaped: String): Int? {
+    private fun findBoundary(shaped: String, from: Int = 0): Int? {
         var sentence = -1
         var clause = -1
-        for (i in shaped.indices) {
+        for (i in from until shaped.length) {
             when (shaped[i]) {
                 '。', '！', '？', '!', '?' -> sentence = i + 1
                 '、', ',', '，' -> clause = i + 1
