@@ -57,7 +57,7 @@ func runTray(srv *server.Server, store *config.Store, ttl time.Duration, openPai
 // openQRImage writes the QR as a PNG and opens it with the default viewer. The
 // file is overwritten on purpose: only the newest (still valid) QR is useful.
 func openQRImage(payload server.QRPayload, code string) {
-	png, err := payload.QRPNG(512)
+	png, err := payload.QRPNG(256)
 	if err != nil {
 		return
 	}
