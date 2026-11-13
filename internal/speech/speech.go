@@ -309,22 +309,22 @@ type command struct {
 // builtinCommands is the single source of truth for standard phrases. Keep the
 // Android CommandParser table in sync with this list.
 var builtinCommands = []command{
-	{phrase: "送信", sequence: mustSeq("enter"), label: "Enter"},
-	{phrase: "改行", aliases: []string{"開業"}, sequence: mustSeq("shift+enter"), label: "Shift+Enter"},
+	{phrase: "送信", aliases: []string{"エンター", "えんたー", "エンタ"}, sequence: mustSeq("enter"), label: "Enter"},
+	{phrase: "改行", aliases: []string{"開業", "シフトエンター"}, sequence: mustSeq("shift+enter"), label: "Shift+Enter"},
 	{phrase: "取り消し", aliases: []string{"取消", "とりけし"}, sequence: mustSeq("ctrl+z"), label: "Ctrl+Z"},
 	{phrase: "全選択", sequence: mustSeq("ctrl+a"), label: "Ctrl+A"},
-	{phrase: "削除", aliases: []string{"バックスペース"}, sequence: mustSeq("backspace"), label: "Backspace", allowRepeat: true},
+	{phrase: "削除", aliases: []string{"バックスペース", "ばっくすぺーす"}, sequence: mustSeq("backspace"), label: "Backspace", allowRepeat: true},
 	{phrase: "前の単語削除", aliases: []string{"単語削除"}, sequence: mustSeq("ctrl+backspace"), label: "Ctrl+Backspace", allowRepeat: true},
 	{phrase: "行削除", sequence: mustSeq("home>shift+end>delete"), label: "行削除 (Home → Shift+End → Delete)"},
-	{phrase: "デリート", sequence: mustSeq("delete"), label: "Delete", allowRepeat: true},
-	{phrase: "上", sequence: mustSeq("up"), label: "↑", allowRepeat: true},
-	{phrase: "下", sequence: mustSeq("down"), label: "↓", allowRepeat: true},
-	{phrase: "左", sequence: mustSeq("left"), label: "←", allowRepeat: true},
-	{phrase: "右", sequence: mustSeq("right"), label: "→", allowRepeat: true},
+	{phrase: "デリート", aliases: []string{"でりーと"}, sequence: mustSeq("delete"), label: "Delete", allowRepeat: true},
+	{phrase: "上", aliases: []string{"アップ", "あっぷ"}, sequence: mustSeq("up"), label: "↑", allowRepeat: true},
+	{phrase: "下", aliases: []string{"ダウン", "だうん"}, sequence: mustSeq("down"), label: "↓", allowRepeat: true},
+	{phrase: "左", aliases: []string{"レフト", "れふと"}, sequence: mustSeq("left"), label: "←", allowRepeat: true},
+	{phrase: "右", aliases: []string{"ライト", "らいと"}, sequence: mustSeq("right"), label: "→", allowRepeat: true},
 	{phrase: "コピー", sequence: mustSeq("ctrl+c"), label: "Ctrl+C"},
-	{phrase: "貼り付け", sequence: mustSeq("ctrl+v"), label: "Ctrl+V"},
+	{phrase: "貼り付け", aliases: []string{"ペースト", "ぺーすと"}, sequence: mustSeq("ctrl+v"), label: "Ctrl+V"},
 	{phrase: "切り取り", sequence: mustSeq("ctrl+x"), label: "Ctrl+X"},
-	{phrase: "やり直し", sequence: mustSeq("ctrl+y"), label: "Ctrl+Y"},
+	{phrase: "やり直し", aliases: []string{"リドゥ"}, sequence: mustSeq("ctrl+y"), label: "Ctrl+Y"},
 	{phrase: "タブ切り替え", sequence: mustSeq("ctrl+tab"), label: "Ctrl+Tab"},
 }
 

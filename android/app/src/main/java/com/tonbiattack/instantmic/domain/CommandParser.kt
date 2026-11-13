@@ -32,22 +32,22 @@ object CommandParser {
     // commands deliberately have no aliases so a misrecognition cannot delete
     // text by accident.
     private val builtinEntries = listOf(
-        Entry("送信", KeyCommand.ENTER),
-        Entry("改行", KeyCommand.SHIFT_ENTER, aliases = listOf("開業")),
+        Entry("送信", KeyCommand.ENTER, aliases = listOf("エンター", "えんたー", "エンタ")),
+        Entry("改行", KeyCommand.SHIFT_ENTER, aliases = listOf("開業", "シフトエンター")),
         Entry("取り消し", KeyCommand.CTRL_Z, aliases = listOf("取消")),
         Entry("全選択", KeyCommand.CTRL_A),
-        Entry("削除", KeyCommand.BACKSPACE, aliases = listOf("バックスペース"), allowRepeat = true),
+        Entry("削除", KeyCommand.BACKSPACE, aliases = listOf("バックスペース", "ばっくすぺーす"), allowRepeat = true),
         Entry("前の単語削除", KeyCommand.CTRL_BACKSPACE, aliases = listOf("単語削除"), allowRepeat = true),
         Entry("行削除", KeyCommand.DELETE_LINE),
-        Entry("デリート", KeyCommand.DELETE, allowRepeat = true),
-        Entry("上", KeyCommand.UP, allowRepeat = true),
-        Entry("下", KeyCommand.DOWN, allowRepeat = true),
-        Entry("左", KeyCommand.LEFT, allowRepeat = true),
-        Entry("右", KeyCommand.RIGHT, allowRepeat = true),
+        Entry("デリート", KeyCommand.DELETE, aliases = listOf("でりーと"), allowRepeat = true),
+        Entry("上", KeyCommand.UP, aliases = listOf("アップ", "あっぷ"), allowRepeat = true),
+        Entry("下", KeyCommand.DOWN, aliases = listOf("ダウン", "だうん"), allowRepeat = true),
+        Entry("左", KeyCommand.LEFT, aliases = listOf("レフト", "れふと"), allowRepeat = true),
+        Entry("右", KeyCommand.RIGHT, aliases = listOf("ライト", "らいと"), allowRepeat = true),
         Entry("コピー", KeyCommand.COPY),
-        Entry("貼り付け", KeyCommand.PASTE, aliases = listOf("貼りつけ")),
+        Entry("貼り付け", KeyCommand.PASTE, aliases = listOf("貼りつけ", "ペースト", "ぺーすと")),
         Entry("切り取り", KeyCommand.CUT),
-        Entry("やり直し", KeyCommand.REDO),
+        Entry("やり直し", KeyCommand.REDO, aliases = listOf("リドゥ")),
         Entry("タブ切り替え", KeyCommand.NEXT_TAB),
     )
 

@@ -132,6 +132,42 @@ func TestInterpretFullWidth(t *testing.T) {
 	}
 }
 
+func TestKatakanaKeyAliases(t *testing.T) {
+	cases := map[string]string{
+		"コマンド、エンター":    "enter",
+		"コマンドエンター":     "enter",
+		"コマンド エンター":    "enter",
+		"コマンド、えんたー":    "enter",
+		"コマンド、シフトエンター": "shift+enter",
+		"コマンド、バックスペース": "backspace",
+		"コマンド、デリート":    "delete",
+		"コマンド、アップ":     "up",
+		"コマンド、ダウン":     "down",
+		"コマンド、レフト":     "left",
+		"コマンド、ライト":     "right",
+		"コマンド、ペースト":    "ctrl+v",
+	}
+	for in, want := range cases {
+		got := Interpret(in)
+		if got.Kind != KindKey || got.Key.String() != want {
+			t.Errorf("Interpret(%q) = %+v, want %s", in, got, want)
+		}
+	}
+}
+
+func TestKatakanaAliasesDoNotLeakIntoText(t *testing.T) {
+	// A word that merely contains a key name must stay text.
+	for _, in := range []string{
+		"エンターキーを押す",
+		"デリートしました",
+		"コマンドエンターについて説明して",
+	} {
+		if got := Interpret(in); got.Kind != KindText {
+			t.Errorf("Interpret(%q).Kind = %v, want KindText", in, got.Kind)
+		}
+	}
+}
+
 func TestInterpretErase(t *testing.T) {
 	for _, in := range []string{
 		"コマンド、言い直し",

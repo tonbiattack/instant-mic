@@ -59,6 +59,37 @@ class CommandParserTest {
     }
 
     @Test
+    fun `katakana key names are accepted`() {
+        val cases = mapOf(
+            "コマンド、エンター" to "enter",
+            "コマンドエンター" to "enter",
+            "コマンド エンター" to "enter",
+            "コマンド、えんたー" to "enter",
+            "コマンド、シフトエンター" to "shift+enter",
+            "コマンド、バックスペース" to "backspace",
+            "コマンド、でりーと" to "delete",
+            "コマンド、アップ" to "up",
+            "コマンド、ダウン" to "down",
+            "コマンド、レフト" to "left",
+            "コマンド、ライト" to "right",
+            "コマンド、ペースト" to "ctrl+v",
+        )
+        for ((input, expected) in cases) {
+            val result = interpret(input)
+            assertTrue("$input -> $result", result is CommandParser.Result.Key)
+            assertEquals(input, expected, (result as CommandParser.Result.Key).command.wire)
+        }
+    }
+
+    @Test
+    fun `katakana key names inside sentences stay text`() {
+        for (input in listOf("エンターキーを押す", "デリートしました", "コマンドエンターについて説明して")) {
+            val result = interpret(input)
+            assertTrue("$input -> $result", result is CommandParser.Result.Text)
+        }
+    }
+
+    @Test
     fun `normal sentences are text`() {
         val sentences = listOf(
             "送信",

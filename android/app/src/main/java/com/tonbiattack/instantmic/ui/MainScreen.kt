@@ -716,11 +716,11 @@ private fun CustomCommandRow(
 }
 
 private val BUILTIN_HINTS = listOf(
-    "送信 → Enter / 改行 → Shift+Enter",
-    "削除 → Backspace / 前の単語削除 → Ctrl+Backspace / 行削除",
-    "デリート / 上 / 下 / 左 / 右（「3回削除」で繰り返し）",
-    "コピー / 貼り付け / 切り取り / やり直し / タブ切り替え",
-    "取り消し → Ctrl+Z / 全選択 → Ctrl+A",
+    "エンター（送信）→ Enter / 改行 → Shift+Enter",
+    "削除 / バックスペース → Backspace / 前の単語削除 / 行削除",
+    "デリート / アップ / ダウン / レフト / ライト（「3回削除」で繰り返し）",
+    "コピー / ペースト / 切り取り / やり直し / タブ切り替え",
+    "取り消し → Ctrl+Z / 全選択 → Ctrl+A / 言い直し",
 )
 
 @Composable

@@ -80,7 +80,7 @@ data class UiState(
     val pendingPairing: PairingPayload? = null,
 ) {
     val commandHint: String
-        get() = "「コマンド、送信」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
+        get() = "「コマンド、エンター」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
 
     /** True when a stored pairing exists and reconnecting on its own is unsafe. */
     val repairRequired: Boolean get() = needsRepair != null
