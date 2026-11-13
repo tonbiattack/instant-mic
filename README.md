@@ -16,7 +16,7 @@ Android スマホを、離れた Windows PC の「音声入力キーボード」
 - カスタムコマンド: 「コマンド、AIに送信」→ Ctrl+Enter などをアプリから登録
 - Bluetooth イヤホンは Windows の音声出力のまま使える（仮想マイク不要）
 
-仕様: [docs/spec.md](docs/spec.md) / プロトコル: [docs/protocol.md](docs/protocol.md) / 機能提案と採否: [docs/proposals.md](docs/proposals.md)
+仕様: [docs/spec.md](docs/spec.md) / プロトコル: [docs/protocol.md](docs/protocol.md) / 機能提案と採否: [docs/proposals.md](docs/proposals.md) / 設計の評価と比較: [docs/evaluation.md](docs/evaluation.md)
 
 ## 構成
 
@@ -151,4 +151,6 @@ go vet ./...
 cd android && .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-`scripts/e2e-target.ps1` は SendInput の手動確認用に、入力内容を記録するテキストボックスを開く。`cmd/e2eclient` はペアリング→送信を CLI で再現する補助ツール（`-qr "<ペイロード>"` でQRペアリング、`-discover` でLAN内の受信アプリ一覧）。`cmd/tryinput` は指定したキー列をカレントのフォーカス先へ送る確認用（`-expect-title` で誤入力を防止）。
+`testDebugUnitTest` には Compose の UI テストも含まれる（Robolectric で JVM 上で動くため、実機もエミュレータも不要）。確認ダイアログ・修正警告・送信結果の表示は CI で検証される。マイク・認識サービス・`SendInput` の実挙動だけは実機で確認する。
+
+`scripts/e2e-target.ps1` は SendInput の手動確認用に、入力内容を記録するテキストボックスを開く。`cmd/e2eclient` はペアリング→送信を CLI で再現する補助ツール（`-qr "<ペイロード>"` でQRペアリング、`-literal` で途中フレーズ、`-discover` でLAN内の受信アプリ一覧）。`cmd/tryinput` は指定したキー列をカレントのフォーカス先へ送る確認用（`-expect-title` で誤入力を防止）。
