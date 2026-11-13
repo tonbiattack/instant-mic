@@ -47,6 +47,35 @@ class WireTest {
     }
 
     @Test
+    fun `ready carries the target window`() {
+        val ready = ReadyMessage.parse(
+            JSONObject(
+                """{"type":"ready","protocol":1,"serverName":"PC","serverId":"s1",
+                   "target":{"title":"main.go","process":"C:\\Tools\\code.exe","ready":true}}""",
+            ),
+        )
+        assertNotNull(ready)
+        assertEquals("main.go", ready!!.target.title)
+        assertEquals("main.go — code.exe", ready.target.label())
+
+        // An older receiver sends no target at all; it must parse as "unknown".
+        val legacy = ReadyMessage.parse(
+            JSONObject("""{"type":"ready","protocol":1,"serverName":"PC","serverId":"s1"}"""),
+        )
+        assertNotNull(legacy)
+        assertNull(legacy!!.target.label())
+    }
+
+    @Test
+    fun `target explains when typing would fail`() {
+        val noFocus = FocusTarget(ready = false)
+        assertNotNull(noFocus.label())
+
+        val elevated = FocusTarget(title = "管理者", ready = true, elevated = true)
+        assertEquals("管理者（管理者権限のため入力できません）", elevated.label())
+    }
+
+    @Test
     fun `ack parsing`() {
         val ack = AckMessage.parse(
             JSONObject("""{"type":"ack","id":"op-1","ok":true,"applied":"text","elapsedMs":12}"""),

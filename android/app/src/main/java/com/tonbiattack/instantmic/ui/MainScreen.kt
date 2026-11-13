@@ -53,6 +53,7 @@ import com.tonbiattack.instantmic.data.Pairing
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeySequence
+import com.tonbiattack.instantmic.domain.TermDictionary
 import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.ReconnectPolicy
@@ -77,6 +78,7 @@ object TestTags {
     const val COMMAND_SEQUENCE = "command_sequence"
     const val COMMAND_SAVE = "command_save"
     const val LIVE_TRANSCRIPT = "live_transcript"
+    const val TARGET_WINDOW = "target_window"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -142,6 +144,8 @@ fun MainScreen(
                     onIncrementalChange = viewModel::setIncrementalMode,
                     onTermDictionaryChange = viewModel::setTermDictionary,
                     onHiraganaChange = viewModel::setHiraganaOutput,
+                    onSaveTerm = viewModel::saveUserTerm,
+                    onDeleteTerm = viewModel::deleteUserTerm,
                 )
             } else {
                 val repair = state.needsRepair
@@ -201,6 +205,20 @@ private fun ConnectionCard(
             val latency = (connection as? ConnectionState.Connected)?.latencyMs
             if (latency != null && latency >= 0) {
                 Text("遅延: 約 ${latency}ms", style = MaterialTheme.typography.bodySmall)
+            }
+            val target = (connection as? ConnectionState.Connected)?.target
+            val targetLabel = target?.label()
+            if (targetLabel != null) {
+                Text(
+                    "入力先: $targetLabel",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (target != null && (!target.ready || target.elevated)) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.testTag(TestTags.TARGET_WINDOW),
+                )
             }
             DiscoveryLine(discovery, connection)
             if (connection !is ConnectionState.Connected) {
@@ -603,6 +621,8 @@ private fun CommandsPanel(
     onIncrementalChange: (IncrementalMode) -> Unit,
     onTermDictionaryChange: (Boolean) -> Unit,
     onHiraganaChange: (Boolean) -> Unit,
+    onSaveTerm: (String, String) -> String?,
+    onDeleteTerm: (String) -> Unit,
 ) {
     // The editor state lives here so a list row can load itself into the fields.
     var phrase by rememberSaveable { mutableStateOf("") }
@@ -682,6 +702,13 @@ private fun CommandsPanel(
             description = "漢字に変換せず、読みのまま入力します（「改行」と「開業」のような変換ミスがなくなります）。AI への指示書き向け。英数字・URL・記号はそのまま残ります。",
             checked = state.hiraganaOutput,
             onChange = onHiraganaChange,
+        )
+
+        UserTermEditor(
+            terms = state.userTerms,
+            error = state.termEditorError,
+            onSave = onSaveTerm,
+            onDelete = onDeleteTerm,
         )
 
         Spacer(Modifier.height(8.dp))
@@ -833,6 +860,84 @@ private fun ChoiceRow(
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 )
                 Text(description, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun UserTermEditor(
+    terms: List<TermDictionary.Term>,
+    error: String?,
+    onSave: (String, String) -> String?,
+    onDelete: (String) -> Unit,
+) {
+    var text by rememberSaveable { mutableStateOf("") }
+    var mishearing by rememberSaveable { mutableStateOf("") }
+    var localError by rememberSaveable { mutableStateOf<String?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("用語辞書の追加", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "「誤って認識される表記」を話すと「正式な表記」で入力されます。誤認識側は日本語で指定してください（英数字を対象にするとコードやURLを壊すため）。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            label = { Text("正式な表記") },
+            placeholder = { Text("Kubernetes") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = mishearing,
+            onValueChange = { mishearing = it },
+            label = { Text("誤って認識される表記") },
+            placeholder = { Text("クバネティス") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        val message = localError ?: error
+        if (message != null) {
+            Text(
+                message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Button(
+            onClick = {
+                localError = onSave(text, mishearing)
+                if (localError == null) {
+                    text = ""
+                    mishearing = ""
+                }
+            },
+        ) {
+            Text("追加")
+        }
+        if (terms.isEmpty()) {
+            Text("追加した用語はありません。", style = MaterialTheme.typography.bodySmall)
+        } else {
+            for (term in terms) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 14.dp, top = 6.dp, end = 4.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(term.text, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                term.mishearings.joinToString(" / "),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        TextButton(onClick = { onDelete(term.text) }) { Text("削除") }
+                    }
+                }
             }
         }
     }

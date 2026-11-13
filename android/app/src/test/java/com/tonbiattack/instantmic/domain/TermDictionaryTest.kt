@@ -1,6 +1,8 @@
 package com.tonbiattack.instantmic.domain
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -108,6 +110,23 @@ class TermDictionaryTest {
         assertEquals("プレビューを開く", TermDictionary.correct("プレビューを開く"))
         // A standalone word still converts.
         assertEquals("Vueを使う", TermDictionary.correct("ビューを使う"))
+    }
+
+    @Test
+    fun `user terms override the built-in list`() {
+        val user = listOf(TermDictionary.Term("Kubernetes", listOf("クバネティス"), userDefined = true))
+        val merged = TermDictionary.withUserTerms(user)
+        assertTrue(merged.any { it.text == "Kubernetes" && it.userDefined })
+        assertEquals("Kubernetes", TermDictionary.correct("クバネティス", merged))
+    }
+
+    @Test
+    fun `user term validation rejects unsafe input`() {
+        assertNotNull(TermDictionary.validateTerm("", "クバネティス"))
+        assertNotNull(TermDictionary.validateTerm("Kubernetes", ""))
+        // An ASCII mishearing would rewrite code and URLs.
+        assertNotNull(TermDictionary.validateTerm("Kubernetes", "kubernetes"))
+        assertNull(TermDictionary.validateTerm("Kubernetes", "クバネティス"))
     }
 
     @Test

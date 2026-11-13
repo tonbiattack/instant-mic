@@ -43,6 +43,8 @@ data class ReadyMessage(
     val serverName: String,
     val serverId: String,
     val commandPrefix: String,
+    /** The window the PC will type into at connect time, when known. */
+    val target: FocusTarget = FocusTarget(),
 ) {
     companion object {
         fun parse(json: JSONObject): ReadyMessage? {
@@ -54,6 +56,37 @@ data class ReadyMessage(
                 serverName = json.optString("serverName"),
                 serverId = json.optString("serverId"),
                 commandPrefix = json.optString("commandPrefix").ifEmpty { "コマンド" },
+                target = FocusTarget.parse(json.optJSONObject("target")),
+            )
+        }
+    }
+}
+
+/** The window the receiver is about to type into. Advisory, not a guarantee. */
+data class FocusTarget(
+    val title: String = "",
+    val process: String = "",
+    val ready: Boolean = true,
+    val elevated: Boolean = false,
+) {
+    /** A short label for the UI, or null when there is nothing useful to show. */
+    fun label(): String? = when {
+        !ready -> "入力先なし（PCでウィンドウをクリックしてください）"
+        elevated -> "${title.ifEmpty { process }}（管理者権限のため入力できません）"
+        title.isNotEmpty() && process.isNotEmpty() -> "$title — ${process.substringAfterLast('\\')}"
+        title.isNotEmpty() -> title
+        process.isNotEmpty() -> process.substringAfterLast('\\')
+        else -> null
+    }
+
+    companion object {
+        fun parse(json: JSONObject?): FocusTarget {
+            if (json == null) return FocusTarget()
+            return FocusTarget(
+                title = json.optString("title"),
+                process = json.optString("process"),
+                ready = json.optBoolean("ready", true),
+                elevated = json.optBoolean("elevated", false),
             )
         }
     }

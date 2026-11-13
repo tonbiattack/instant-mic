@@ -33,7 +33,28 @@ object TextShaper {
         Word("はてな", "？"),
         Word("まる", "。"),
         Word("てん", "、"),
-    )
+        // Coding symbols. Mirrors internal/speech/shape.go. Each is a word
+        // nobody says by accident, and like every standalone word it only
+        // converts at a boundary, so normal prose is unaffected.
+        Word("あんだーすこあ", "_"),
+        Word("はいろふん", "@"),
+        Word("ばっくくぉーと", "`"),
+        Word("だぶるくぉーと", "\""),
+        Word("ぱーせんと", "%"),
+        Word("あんど", "&"),
+        Word("ぱいぷ", "|"),
+        Word("いこーる", "="),
+        Word("ぷらす", "+"),
+        Word("まいなす", "-"),
+        Word("あすたりすく", "*"),
+        Word("どる", "$"),
+        Word("しゃーぷ", "#"),
+        Word("はっしゅ", "#"),
+        Word("ちるだ", "~"),
+        Word("かっこまる", "()"),
+        Word("かっこはな", "[]"),
+        Word("かっこなみ", "{}"),
+    ).sortedByDescending { it.spoken.length }
 
     fun shape(text: String): String {
         if (text.isEmpty()) return text

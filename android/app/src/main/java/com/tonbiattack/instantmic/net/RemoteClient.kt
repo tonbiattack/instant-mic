@@ -5,6 +5,7 @@ import com.tonbiattack.instantmic.protocol.AckMessage
 import com.tonbiattack.instantmic.protocol.AuthMessage
 import com.tonbiattack.instantmic.protocol.ErrorMessage
 import com.tonbiattack.instantmic.protocol.EraseMessage
+import com.tonbiattack.instantmic.protocol.FocusTarget
 import com.tonbiattack.instantmic.protocol.KeyMessage
 import com.tonbiattack.instantmic.protocol.OperationIds
 import com.tonbiattack.instantmic.protocol.PingMessage
@@ -33,11 +34,16 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-/** User-visible connection state. */
+    /** User-visible connection state. */
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
     data object Connecting : ConnectionState
-    data class Connected(val serverName: String, val latencyMs: Long?) : ConnectionState
+    data class Connected(
+        val serverName: String,
+        val latencyMs: Long?,
+        /** The window the PC reported at connect time, when known. */
+        val target: FocusTarget = FocusTarget(),
+    ) : ConnectionState
     data class Failed(val message: String, val retryable: Boolean) : ConnectionState
 }
 
@@ -80,6 +86,25 @@ class RemoteClient(
     private var manuallyClosed = false
     private var startedFor: Pairing? = null
 
+    /**
+     * Cached client, keyed by the pinned fingerprint.
+     *
+     * OkHttp keeps its connection pool and TLS sessions in the client, so
+     * building a new one per attempt forced a full handshake after every drop.
+     * The fingerprint is the only thing that changes the trust configuration.
+     */
+    private var cachedClient: OkHttpClient? = null
+    private var cachedFingerprint: String? = null
+
+    private fun clientFor(fingerprint: String): OkHttpClient {
+        val cached = cachedClient
+        if (cached != null && cachedFingerprint == fingerprint) return cached
+        return clientFactory(fingerprint).also {
+            cachedClient = it
+            cachedFingerprint = fingerprint
+        }
+    }
+
     /** True once start() has been called for the current pairing. */
     val isStarted: Boolean
         get() = webSocketJob?.isActive == true
@@ -89,7 +114,16 @@ class RemoteClient(
         // Ignore redundant starts for the same pairing (the settings collector
         // and the pairing flow can both request a connection).
         if (startedFor == pairing && isStarted) return
+        // A different pairing may pin a different certificate, so its cached
+        // client must not be reused. Keeping the client across reconnects is the
+        // point of the cache: it preserves the connection pool and TLS session.
+        val fingerprintChanged = startedFor?.certificateFingerprint != pairing.certificateFingerprint
         stop()
+        if (fingerprintChanged) {
+            cachedClient?.dispatcher?.executorService?.shutdown()
+            cachedClient = null
+            cachedFingerprint = null
+        }
         startedFor = pairing
         this.pairing = pairing
         manuallyClosed = false
@@ -112,7 +146,7 @@ class RemoteClient(
             val current = pairing ?: return
             _state.value = ConnectionState.Connecting
             val opened = CompletableDeferred<Boolean>()
-            val client = clientFactory(current.certificateFingerprint)
+            val client = clientFor(current.certificateFingerprint)
             val request = Request.Builder()
                 .url("wss://${current.host}:${current.port}/ws")
                 .build()
@@ -264,7 +298,7 @@ class RemoteClient(
                     }
                     attempt = 0
                     latency.set(-1)
-                    _state.value = ConnectionState.Connected(ready.serverName, null)
+                    _state.value = ConnectionState.Connected(ready.serverName, null, ready.target)
                     opened.complete(true)
                     startKeepalive(webSocket)
                 }

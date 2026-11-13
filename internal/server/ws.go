@@ -173,6 +173,7 @@ func (c *conn) authenticate(s *Server) (protocol.Ready, error) {
 
 	s.store.MarkSeen(dev.ID)
 	cfg := s.store.Snapshot()
+	status := s.inserter.Status()
 	return protocol.Ready{
 		Type:        protocol.TypeReady,
 		Protocol:    protocol.Version,
@@ -181,6 +182,12 @@ func (c *conn) authenticate(s *Server) (protocol.Ready, error) {
 		ServerTime:  time.Now().UnixMilli(),
 		DeviceID:    dev.ID,
 		CommandPref: cfg.CommandPrefix,
+		Target: protocol.FocusTarget{
+			Title:    status.Title,
+			Process:  status.Process,
+			Ready:    status.HasFocus,
+			Elevated: status.Elevated,
+		},
 	}, nil
 }
 
