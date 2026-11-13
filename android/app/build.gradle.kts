@@ -57,6 +57,8 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Compose UI tests run on the JVM through Robolectric.
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -96,6 +98,14 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     // Real org.json for JVM unit tests; the mockable android.jar only has stubs.
     testImplementation(libs.json)
+    // Compose UI tests on the JVM via Robolectric, so CI covers the screens
+    // without a device. The manifest artifact supplies the activity the test
+    // rule needs.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

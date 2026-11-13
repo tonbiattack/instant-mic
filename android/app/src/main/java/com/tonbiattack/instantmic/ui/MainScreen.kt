@@ -504,7 +504,7 @@ private fun LiveTranscriptPanel(
 }
 
 @Composable
-private fun ActionStatus(
+internal fun ActionStatus(
     state: UiState,
     onDismiss: () -> Unit,
     onConfirmCommand: () -> Unit,
