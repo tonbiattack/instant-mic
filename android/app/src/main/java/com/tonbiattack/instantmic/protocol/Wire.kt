@@ -59,11 +59,12 @@ data class ReadyMessage(
     }
 }
 
-data class TextMessage(val id: String, val text: String) {
+data class TextMessage(val id: String, val text: String, val literal: Boolean = false) {
     fun toJson(): String = JSONObject().apply {
         put("type", Wire.TYPE_TEXT)
         put("id", id)
         put("text", text)
+        if (literal) put("literal", true)
     }.toString()
 }
 

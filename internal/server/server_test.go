@@ -430,8 +430,71 @@ func TestSpokenUndoRemovesLastInsertion(t *testing.T) {
 	}
 }
 
-func TestUndoIsSingleUse(t *testing.T) {
+func TestLiteralPhraseIsNeverACommand(t *testing.T) {
 	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	// A settled phrase is typed literally, never interpreted: a phrase that is
+	// also a key command must not press anything on the PC.
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "l1", Text: "送信", Literal: true})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "text" {
+		t.Fatalf("literal phrase = %+v", ack)
+	}
+	texts, keys := env.ins.snapshot()
+	if len(keys) != 0 {
+		t.Fatalf("literal phrase pressed keys: %v", keys)
+	}
+	if len(texts) != 1 || texts[0] != "送信" {
+		t.Fatalf("texts = %v", texts)
+	}
+}
+
+func TestLiteralPhraseStartingWithWakeWordIsRefused(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	// The phone keeps incremental input off for commands, so a partial phrase
+	// that starts like the wake word means the sides disagree.
+	for _, text := range []string{"コマンド", "コマ", "コマンド、送信"} {
+		_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "w1", Text: text, Literal: true})
+		ack := readAck(t, ws)
+		if ack.OK {
+			t.Fatalf("literal %q was typed", text)
+		}
+	}
+	if texts, _ := env.ins.snapshot(); len(texts) != 0 {
+		t.Fatalf("texts = %v, want none", texts)
+	}
+}
+
+func TestIncrementalPhrasesUndoAsOneInsertion(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.pair(t, "dev-1")
+	ws := env.connect(t, "dev-1", token)
+
+	for i, phrase := range []string{"いちです。", "にです。"} {
+		_ = ws.WriteJSON(protocol.Text{
+			Type: protocol.TypeText, ID: "p" + string(rune('a'+i)), Text: phrase, Literal: true,
+		})
+		if ack := readAck(t, ws); !ack.OK {
+			t.Fatalf("phrase %q = %+v", phrase, ack)
+		}
+	}
+	_ = ws.WriteJSON(protocol.Text{Type: protocol.TypeText, ID: "undo-all", Text: "コマンド、言い直し"})
+	ack := readAck(t, ws)
+	if !ack.OK || ack.Applied != "erase" {
+		t.Fatalf("undo = %+v", ack)
+	}
+	// 5 + 4 = 9 runes across both phrases.
+	if got := env.ins.erasedCounts(); len(got) != 1 || got[0] != 9 {
+		t.Fatalf("erased = %v, want [9]", got)
+	}
+}
+
+func TestUndoIsSingleUse(t *testing.T) {	env := newTestEnv(t)
 	token := env.pair(t, "dev-1")
 	ws := env.connect(t, "dev-1", token)
 

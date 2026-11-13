@@ -70,6 +70,11 @@ type Text struct {
 	Type string `json:"type"`
 	ID   string `json:"id"`
 	Text string `json:"text"`
+	// Literal marks text that must be typed as-is, never interpreted as a
+	// voice command. Clients set it for settled phrases typed while the user is
+	// still speaking, so a half-heard utterance can never press Enter or
+	// Backspace on the PC.
+	Literal bool `json:"literal,omitempty"`
 }
 
 // Key asks the receiver to press a validated key sequence.

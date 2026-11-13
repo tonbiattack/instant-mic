@@ -39,3 +39,32 @@ func validateText(text string) error {
 	}
 	return nil
 }
+
+// validateLiteral additionally refuses a settled phrase that looks like the
+// wake prefix. The phone disables incremental input for commands, so a literal
+// phrase starting with it means the sides disagree; refusing is safer than
+// typing something the final result will also type.
+func validateLiteral(text string) error {
+	if err := validateText(text); err != nil {
+		return err
+	}
+	normalized := speech.Normalize(text)
+	if normalized == "" {
+		return errors.New("empty text")
+	}
+	// Any prefix of the wake word counts: the phrase may be the beginning of a
+	// command that the final result will interpret.
+	prefix := speech.Normalize(speech.CommandPrefix)
+	limit := len([]rune(normalized))
+	if n := len([]rune(prefix)); n < limit {
+		limit = n
+	}
+	runes := []rune(normalized)
+	prefixRunes := []rune(prefix)
+	for i := 1; i <= limit; i++ {
+		if string(runes[:i]) == string(prefixRunes[:i]) {
+			return errors.New("コマンドとして解釈される可能性があるため、途中入力しません")
+		}
+	}
+	return nil
+}

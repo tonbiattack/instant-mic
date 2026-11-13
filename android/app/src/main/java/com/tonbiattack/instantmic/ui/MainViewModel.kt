@@ -7,6 +7,8 @@ import com.tonbiattack.instantmic.domain.CommandParser
 import com.tonbiattack.instantmic.domain.CustomCommand
 import com.tonbiattack.instantmic.domain.CustomCommands
 import com.tonbiattack.instantmic.domain.KeyCommand
+import com.tonbiattack.instantmic.domain.TermDictionary
+import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionPlanner
 import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.DeliveryResult
@@ -20,9 +22,17 @@ import com.tonbiattack.instantmic.protocol.DeviceIds
 import com.tonbiattack.instantmic.protocol.PairingPayload
 import com.tonbiattack.instantmic.speech.HapticCue
 import com.tonbiattack.instantmic.speech.Haptics
+import com.tonbiattack.instantmic.speech.IncrementalMode
+import com.tonbiattack.instantmic.speech.IncrementalFinish
+import com.tonbiattack.instantmic.speech.LiveTranscript
+import com.tonbiattack.instantmic.speech.RecognitionAlternative
+import com.tonbiattack.instantmic.speech.RecognitionEngine
+import com.tonbiattack.instantmic.speech.RecognitionOptions
 import com.tonbiattack.instantmic.speech.RecognizerCapability
+import com.tonbiattack.instantmic.speech.SilenceMode
 import com.tonbiattack.instantmic.speech.SpeechRecognizerController
 import com.tonbiattack.instantmic.speech.SpeechState
+import com.tonbiattack.instantmic.speech.Transcript
 import com.tonbiattack.instantmic.speech.isActive
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -53,6 +63,9 @@ sealed interface LastAction {
 
     /** The phrase used the wake prefix but no command matched. */
     data class UnknownCommand(val preview: String, val raw: String) : LastAction
+
+    /** Part of the utterance was typed, then the recognizer revised it. */
+    data class Revision(val preview: String) : LastAction
 }
 
 data class UiState(
@@ -78,6 +91,20 @@ data class UiState(
     val qrScanInProgress: Boolean = false,
     /** A QR scanned by another app, waiting for the user's confirmation. */
     val pendingPairing: PairingPayload? = null,
+    /** Live, unconfirmed recognizer text for the current session. */
+    val liveTranscript: LiveTranscript? = null,
+
+    /** Alternative readings of the last final result, for manual comparison. */
+    val alternatives: List<RecognitionAlternative> = emptyList(),
+    /** Whether the last result came from on-device ASR, when the service says. */
+    val onDeviceHeard: Boolean? = null,
+    /** Recognition settings. */
+    val recognitionEngine: RecognitionEngine = RecognitionEngine.OnDevice,
+    val silenceMode: SilenceMode = SilenceMode.Standard,
+    val incrementalMode: IncrementalMode = IncrementalMode.Off,
+    val termDictionary: Boolean = true,
+    /** Text typed so far in the current utterance by incremental sending. */
+    val incrementalProgress: String = "",
 ) {
     val commandHint: String
         get() = "「コマンド、エンター」Enter / 「コマンド、改行」Shift+Enter / 「コマンド、削除」Backspace"
@@ -106,6 +133,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** True while the user asked for a connection this session. */
     private var autoConnectRequested = false
 
+    /**
+     * Per-utterance state for incremental typing, or null when the current
+     * utterance is not being sent phrase by phrase.
+     *
+     * It lives here rather than in the controller because it has to coordinate
+     * with what actually reached the PC (acknowledged text, a conflict, a
+     * command that must not be split).
+     */
+    private var utteranceHandler: UtteranceHandler? = null
+
+    /** Recognition session the current [utteranceHandler] belongs to. */
+    private var utteranceSession: Long = -1
+
+    /** Orders settled phrases and final results into one consumer. */
+    private val eventQueue = SpeechEventQueue()
+
     private val _ui = MutableStateFlow(UiState(hapticsAvailable = haptics.supported))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
@@ -120,8 +163,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     continuousListening = stored.continuousListening,
                     hapticsEnabled = stored.hapticsEnabled,
                     autoStartListening = stored.autoStartListening,
+                    recognitionEngine = stored.recognitionEngine,
+                    silenceMode = stored.silenceMode,
+                    incrementalMode = stored.incrementalMode,
+                    termDictionary = stored.termDictionary,
                 )
                 speech.setContinuous(stored.continuousListening)
+                speech.updateOptions(recognitionOptions())
                 val pairing = stored.pairing ?: return@collectLatest
                 if (remote.state.value is ConnectionState.Disconnected) {
                     // First connection after start: try to find the same PC again
@@ -148,12 +196,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             speech.state.collect { state ->
                 _ui.value = _ui.value.copy(speech = state)
+                if (!state.isActive) {
+                    // A finished utterance has no live preview left. The
+                    // utterance handler is cleared by handleFinal instead: the
+                    // final result may arrive after the state is already idle,
+                    // and losing the handler there would type the text twice.
+                    _ui.value = _ui.value.copy(liveTranscript = null)
+                }
+                if (state is SpeechState.Failed) {
+                    // No final result will arrive, so nothing more will be
+                    // typed for this utterance.
+                    _ui.value = _ui.value.copy(incrementalProgress = "")
+                    utteranceHandler = null
+                    utteranceSession = -1
+                }
+            }
+        }
+        viewModelScope.launch {
+            for (event in eventQueue.events()) {
+                when (event) {
+                    is SpeechEvent.Phrase -> handleIncrementalPhrase(event.text, event.sessionId)
+                    is SpeechEvent.Final -> handleFinal(event.transcript)
+                }
+            }
+        }
+        viewModelScope.launch {
+            speech.partials.collect { partial ->
+                _ui.value = _ui.value.copy(liveTranscript = partial)
+            }
+        }
+        viewModelScope.launch {
+            speech.phrases.collect { phrase ->
+                eventQueue.offer(SpeechEvent.Phrase(phrase.text, phrase.sessionId))
+            }
+        }
+        viewModelScope.launch {
+            speech.alternatives.collect { result ->
+                _ui.value = _ui.value.copy(
+                    alternatives = result.alternatives,
+                    onDeviceHeard = result.onDevice,
+                )
             }
         }
         viewModelScope.launch {
             speech.results.collect { transcript ->
                 _ui.value = _ui.value.copy(lastTranscript = transcript.text)
-                handleTranscript(transcript.text)
+                eventQueue.offer(SpeechEvent.Final(transcript))
             }
         }
         viewModelScope.launch {
@@ -162,6 +250,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** Combines stored settings into the options for the next recognition session. */
+    private fun recognitionOptions(): RecognitionOptions = RecognitionOptions(
+        continuous = _ui.value.continuousListening,
+        languageTag = "ja-JP",
+        engine = _ui.value.recognitionEngine,
+        silence = _ui.value.silenceMode,
+        incremental = _ui.value.incrementalMode,
+        biasingTerms = if (_ui.value.termDictionary) TermDictionary.biasingPhrases() else emptyList(),
+        maxResults = 3,
+        partialResults = true,
+    )
 
     fun refreshCapability() {
         _ui.value = _ui.value.copy(
@@ -192,8 +292,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
-        _ui.value = _ui.value.copy(lastAction = LastAction.None)
-        speech.start(continuous = _ui.value.continuousListening, languageTag = "ja-JP", preferOnDevice = true)
+        _ui.value = _ui.value.copy(
+            lastAction = LastAction.None,
+            alternatives = emptyList(),
+            incrementalProgress = "",
+        )
+        speech.start(recognitionOptions())
     }
 
     /** Explicit stop, also used when the activity goes to the background. */
@@ -216,6 +320,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(continuousListening = enabled)
         viewModelScope.launch { settings.setContinuousListening(enabled) }
         speech.setContinuous(enabled)
+    }
+
+    fun setRecognitionEngine(engine: RecognitionEngine) {
+        _ui.value = _ui.value.copy(recognitionEngine = engine)
+        viewModelScope.launch { settings.setRecognitionEngine(engine) }
+        speech.updateOptions(recognitionOptions())
+    }
+
+    fun setSilenceMode(mode: SilenceMode) {
+        _ui.value = _ui.value.copy(silenceMode = mode)
+        viewModelScope.launch { settings.setSilenceMode(mode) }
+        speech.updateOptions(recognitionOptions())
+    }
+
+    fun setIncrementalMode(mode: IncrementalMode) {
+        _ui.value = _ui.value.copy(incrementalMode = mode)
+        viewModelScope.launch { settings.setIncrementalMode(mode) }
+        speech.updateOptions(recognitionOptions())
+    }
+
+    fun setTermDictionary(enabled: Boolean) {
+        _ui.value = _ui.value.copy(termDictionary = enabled)
+        viewModelScope.launch { settings.setTermDictionary(enabled) }
+        speech.updateOptions(recognitionOptions())
+    }
+
+    /**
+     * Adopts an alternative reading the user picked.
+     *
+     * Only the phone-side preview is replaced: nothing new is typed, because the
+     * primary reading is already in the document and rewriting it from here
+     * could not be done safely.
+     */
+    fun chooseAlternative(alternative: RecognitionAlternative) {
+        _ui.value = _ui.value.copy(
+            lastTranscript = alternative.text,
+            alternatives = emptyList(),
+        )
+    }
+
+    fun dismissAlternatives() {
+        _ui.value = _ui.value.copy(alternatives = emptyList())
     }
 
     fun setHapticsEnabled(enabled: Boolean) {
@@ -413,28 +559,78 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Routes a finalized transcript.
      *
-     * Exactly one outcome happens: a key action, a text insertion, or nothing.
-     * Interim results never reach here because the recognizer ignores them and
-     * only reports a session once.
+     * Runs on the single queue consumer, so any settled phrases of the same
+     * utterance have already been typed (or deliberately abandoned).
      */
-    private fun handleTranscript(transcript: String) {
+    private suspend fun handleFinal(transcript: Transcript) {
         val state = _ui.value
         val prefix = state.pairing?.commandPrefix ?: CommandParser.DEFAULT_PREFIX
-        when (val result = CommandParser.interpret(transcript, prefix, state.customCommands)) {
+
+        // Finish the incremental utterance first: the final result tells us
+        // whether the earlier phrases still match what the user said.
+        // A handler from a different session (an utterance that ended with an
+        // error) is stale and must not influence this result.
+        val handler = if (utteranceSession == transcript.sessionId) utteranceHandler else null
+        utteranceHandler = null
+        utteranceSession = -1
+        if (handler != null) {
+            when (val finish = handler.finish(transcript.text)) {
+                is IncrementalFinish.Conflict -> {
+                    // Already-typed text was revised. Do not guess: keep the
+                    // preview and ask the user to check.
+                    _ui.value = _ui.value.copy(
+                        incrementalProgress = "",
+                        lastAction = LastAction.Revision(finish.finalText),
+                    )
+                    return
+                }
+
+                is IncrementalFinish.Remaining -> {
+                    val result = CommandParser.interpret(finish.text, prefix, state.customCommands)
+                    if (result !is CommandParser.Result.Text) {
+                        // A command tail must not run after part of the
+                        // utterance was already typed as text.
+                        _ui.value = _ui.value.copy(
+                            incrementalProgress = "",
+                            lastAction = LastAction.Revision(finish.text),
+                        )
+                        return
+                    }
+                    _ui.value = _ui.value.copy(incrementalProgress = "")
+                    // The utterance is already half typed, so the tail is typed
+                    // literally: it must not turn into a command now. The undo
+                    // record continues the same insertion.
+                    sendText(shapeFinal(result.text), literal = true, continuePrevious = true)
+                    return
+                }
+
+                is IncrementalFinish.NothingSent -> {
+                    // Nothing was typed yet: handle the final below, exactly as
+                    // the non-incremental path does.
+                }
+
+                IncrementalFinish.Complete -> {
+                    _ui.value = _ui.value.copy(incrementalProgress = "")
+                    return
+                }
+            }
+        }
+
+        when (val result = CommandParser.interpret(transcript.text, prefix, state.customCommands)) {
             CommandParser.Result.Empty -> {
-                _ui.value = _ui.value.copy(lastAction = LastAction.NoCommand(transcript))
+                _ui.value = _ui.value.copy(lastAction = LastAction.NoCommand(transcript.text))
             }
 
-            is CommandParser.Result.Text -> sendText(result.text)
+            is CommandParser.Result.Text -> sendText(shapeFinal(result.text))
 
-            is CommandParser.Result.Key -> sendKey(result.command, transcript)
+            is CommandParser.Result.Key -> sendKey(result.command, transcript.text)
 
             is CommandParser.Result.Erase -> sendErase()
 
             is CommandParser.Result.UnknownCommand -> {
                 _ui.value = _ui.value.copy(
                     lastAction = LastAction.UnknownCommand(
-                        preview = transcript,
+                        preview = transcript.text,
                         raw = result.raw,
                     ),
                 )
@@ -442,7 +638,72 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun sendText(text: String) {
+    /** Applies the development-term dictionary to literal text only. */
+    private fun shape(text: String): String =
+        if (_ui.value.termDictionary) TermDictionary.correct(text) else text
+
+    /** Applies dictionary and punctuation shaping to a whole final utterance. */
+    private fun shapeFinal(text: String): String = shape(TextShaper.shape(text))
+
+    /**
+     * Types one settled phrase of the live transcript.
+     *
+     * A phrase leaves the command parser out of the loop entirely: it is only
+     * ever literal text, so Enter / Backspace / 行削除 can never fire from a
+     * half-heard utterance. The caller is the single queue consumer, so phrases
+     * are typed in the order the recognizer produced them.
+     */
+    private suspend fun handleIncrementalPhrase(raw: String, sessionId: Long) {
+        val prefix = _ui.value.pairing?.commandPrefix ?: CommandParser.DEFAULT_PREFIX
+        if (utteranceSession != sessionId) {
+            // A new session (a new utterance) starts its own accounting.
+            utteranceSession = sessionId
+            utteranceHandler = UtteranceHandler(prefix)
+        }
+        val handler = utteranceHandler ?: UtteranceHandler(prefix).also {
+            utteranceHandler = it
+            utteranceSession = sessionId
+        }
+        handler.notePhrase(raw)
+        _ui.value = _ui.value.copy(incrementalProgress = handler.emitted)
+        if (handler.hasFailed) return
+
+        // Phrases are already shaped by the recognizer side; the dictionary is
+        // applied per phrase so a term split across phrases is rarely missed.
+        val text = shape(raw)
+        val result = remote.sendText(text, literal = true)
+        if (result.ok || result.duplicate) {
+            handler.noteAcknowledged(text)
+            val combined = _ui.value.lastText + text
+            settings.saveLastText(combined)
+            _ui.value = _ui.value.copy(
+                lastText = combined,
+                busy = false,
+                incrementalProgress = handler.emitted,
+            )
+        } else {
+            // The rest of the utterance is not typed: appending after a gap
+            // would silently reorder the user's text.
+            handler.fail()
+            _ui.value = _ui.value.copy(
+                incrementalProgress = handler.emitted,
+                lastAction = LastAction.Failed(
+                    raw.take(40),
+                    result.error ?: "送信に失敗しました",
+                ),
+            )
+        }
+    }
+
+    /**
+     * Sends literal text.
+     *
+     * [continuePrevious] means this text is the tail of an utterance whose
+     * earlier phrases were already typed, so the undo record must accumulate
+     * instead of being replaced; otherwise 「言い直し」 would only remove the
+     * tail.
+     */
+    private fun sendText(text: String, literal: Boolean = false, continuePrevious: Boolean = false) {
         if (text.length > CommandParser.MAX_TEXT_LENGTH) {
             _ui.value = _ui.value.copy(
                 lastAction = LastAction.Failed(text.take(40), "文字数が多すぎます（${CommandParser.MAX_TEXT_LENGTH}文字まで）"),
@@ -451,9 +712,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         _ui.value = _ui.value.copy(lastAction = LastAction.Sending(text), busy = true)
         viewModelScope.launch {
-            val result = remote.sendText(text)
-            settings.saveLastText(text)
-            _ui.value = _ui.value.copy(busy = false, lastAction = describe(result, text))
+            val result = remote.sendText(text, literal = literal)
+            if (result.ok || result.duplicate) {
+                val combined = if (continuePrevious) _ui.value.lastText + text else text
+                settings.saveLastText(combined)
+                _ui.value = _ui.value.copy(lastText = combined, busy = false, lastAction = describe(result, text))
+            } else {
+                // The text is not in the document, so the undo record is
+                // unchanged.
+                _ui.value = _ui.value.copy(busy = false, lastAction = describe(result, text))
+            }
         }
     }
 
@@ -616,5 +884,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         discovery.stop()
         remote.stop()
         speech.release()
+        eventQueue.close()
     }
 }
