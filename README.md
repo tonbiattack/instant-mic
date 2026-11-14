@@ -196,6 +196,12 @@ Android 13 以降で端末内認識が利用できる場合はオフライン認
 - 管理者権限で動作するアプリや一部ゲームには入力できない
 - Enter の意味はアプリごとに異なる（送信/改行）。カスタムコマンドで置き換えられる
 
+## ライセンス
+
+[MIT License](LICENSE)。商用・改変・再配布は自由ですが、著作権表示と本許諾文を残してください。無保証です。
+
+同梱ライブラリの表示は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にまとめています。特に Kuromoji の IPADIC 辞書は Apache-2.0 と NAIST/ICOT の条項により **NOTICE の保持が必須**なので、配布物（APK 内の assets、Windows ZIP 内）にも同じファイルを含めています。
+
 ## 開発
 
 ```powershell

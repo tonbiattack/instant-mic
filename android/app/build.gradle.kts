@@ -83,7 +83,10 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            // Kuromoji ships licence/notice files that collide with okhttp's.
+            // Several libraries ship licence/notice files under the same names,
+            // which would otherwise collide. They are NOT discarded: the full
+            // attributions live in THIRD_PARTY_NOTICES.md, which is bundled as an
+            // asset below, so Apache-2.0 section 4(d) is satisfied.
             excludes += "/META-INF/CONTRIBUTORS.md"
             excludes += "/META-INF/LICENSE*"
             excludes += "/META-INF/NOTICE*"
@@ -91,6 +94,8 @@ android {
             excludes += "/META-INF/*.kotlin_module"
         }
     }
+
+    sourceSets["main"].assets.srcDir("$rootDir/../licenses")
 
     testOptions {
         unitTests.isReturnDefaultValues = true

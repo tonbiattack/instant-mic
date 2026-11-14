@@ -81,6 +81,8 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o dist/instant-mic.exe ./cmd/instant-mic
           if (-not (Test-Path dist/instant-mic.exe)) { throw "build produced no exe" }
           Copy-Item README.md dist/README.md
+          Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          Copy-Item LICENSE dist/LICENSE.txt
           Copy-Item scripts/e2e-target.ps1 dist/e2e-target.ps1
           @"
           instant-mic receiver $env:VERSION
