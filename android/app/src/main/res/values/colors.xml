@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0B6BCB</color>
+    <!-- Matches the top-left stop of the logo gradient so the adaptive icon and
+         the in-repo logo read as the same mark. -->
+    <color name="ic_launcher_background">#1F7AE0</color>
 </resources>
