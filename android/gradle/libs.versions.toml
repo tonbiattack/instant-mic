@@ -35,7 +35,7 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 # Japanese morphological analyser; used only to convert kanji to kana when the
 # user opts in. The dictionary is bundled (about 13 MB of compressed text).
 kuromoji = { group = "com.atilika.kuromoji", name = "kuromoji-ipadic", version.ref = "kuromoji" }
-json = { group = "org.json", name = "json", version = "20240303" }
+json = { group = "org.json", name = "json", version = "20260814" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 # Runs Compose UI tests on the JVM, so CI verifies the screens without a device.
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
