@@ -16,6 +16,59 @@ Android スマホを、離れた Windows PC の「音声入力キーボード」
 - カスタムコマンド: 「コマンド、AIに送信」→ Ctrl+Enter などをアプリから登録
 - Bluetooth イヤホンは Windows の音声出力のまま使える（仮想マイク不要）
 
+## ダウンロード
+
+[Releases](https://github.com/tonbiattack/instant-mic/releases) から最新版を取得してください。
+
+| 配布物 | 対象 | 内容 |
+| --- | --- | --- |
+| `instant-mic-windows-amd64.zip` | Windows 10/11 (x64) | 受信アプリ（exe）と手順書 |
+| `instant-mic-android.apk` | Android 8.0 以上 | 送信アプリ |
+
+各ファイルの `.sha256` も一緒に公開しています。取得後に照合できます。
+
+```powershell
+# Windows
+Get-FileHash .\instant-mic-windows-amd64.zip -Algorithm SHA256
+# Android（PC 上で）
+certutil -hashfile instant-mic-android.apk SHA256
+```
+
+### Windows への導入
+
+1. ZIP を展開する
+2. `instant-mic.exe` を右クリック → プロパティ →「ブロックの解除」にチェック（初回のみ）
+3. `instant-mic.exe` を実行する
+4. 接続できない場合は、Windows ファイアウォールで `instant-mic.exe` の受信を許可する
+
+設定は `%AppData%\instant-mic\config.json` に保存されます。終了は通知領域のアイコンから「終了」を選びます。
+
+### Android への導入
+
+1. `instant-mic-android.apk` を端末へ移して開く
+2. 「提供元不明のアプリ」のインストールを求められたら、そのアプリ（ブラウザやファイルマネージャ）に許可を与える
+3. インストールして起動する
+
+**必ずこのリポジトリの Releases から取得してください。** APK は改変されていないかを SHA-256 で確認できます。他の配布元の APK は、同じ署名でない限り上書きインストールできません（逆に言うと、一度別の配布元のものを入れると、公式版を入れる前にアンインストールが必要になります）。
+
+### ペアリング
+
+1. Windows の通知領域のアイコンを右クリック →「ペアリングを開始」（QR と6桁コードが出る）
+2. Android アプリで「QRコードを読み取る」を押して読み取る
+3. 以後はアプリを開くだけで自動接続します
+
+QR を読み取れない場合は、PC 画面の6桁コードと IP アドレスを手動で入力できます。
+
+## 使い方
+
+1. PC の入力したい欄（メモ帳、ブラウザ、エディタなど）をクリックしてフォーカスする
+2. Android アプリで「タップして話す」を押して話す
+3. 話し終えると確定したテキストが PC に入力される
+4. 「コマンド、送信」で Enter、「コマンド、改行」で Shift+Enter、「コマンド、言い直し」で直前の入力を取り消す
+
+連続音声入力では、無音を挟んで話し続けてもそのまま次の発話が入力されます。止めるときだけもう一度タップします。
+
+
 仕様: [docs/spec.md](docs/spec.md) / プロトコル: [docs/protocol.md](docs/protocol.md) / 機能提案と採否: [docs/proposals.md](docs/proposals.md) / 設計の評価と比較: [docs/evaluation.md](docs/evaluation.md)
 
 ## 構成
@@ -142,6 +195,12 @@ Android 13 以降で端末内認識が利用できる場合はオフライン認
 - Android のバックグラウンドでの常時マイク待機は対象外（画面を開いて使う。`onPause` で停止する）
 - 管理者権限で動作するアプリや一部ゲームには入力できない
 - Enter の意味はアプリごとに異なる（送信/改行）。カスタムコマンドで置き換えられる
+
+## ライセンス
+
+[MIT License](LICENSE)。商用・改変・再配布は自由ですが、著作権表示と本許諾文を残してください。無保証です。
+
+同梱ライブラリの表示は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にまとめています。特に Kuromoji の IPADIC 辞書は Apache-2.0 と NAIST/ICOT の条項により **NOTICE の保持が必須**なので、配布物（APK 内の assets、Windows ZIP 内）にも同じファイルを含めています。
 
 ## 開発
 
