@@ -1,22 +1,41 @@
 # instant-mic
 
-Android スマホを、離れた Windows PC の「音声入力キーボード」にする LAN 専用アプリ。
+<img src="docs/images/logo.png" width="96" align="right" alt="instant-mic logo">
 
-- スマホ: ワンタップで日本語音声認識 → 確定結果だけを PC へ送信
-- PC: 認証済みメッセージだけを受け取り、フォーカス中の入力欄へ Unicode 文字と定型キーを送る
-- 接続: 初回はPC画面のQRを読み取るだけ。2回目以降はアプリを開けば同じPCへ自動接続
-- 音声コマンド: 「コマンド、送信」→ Enter、「コマンド、改行」→ Shift+Enter、「コマンド、削除」→ Backspace、「コマンド、行削除」→ 現在行を削除、「コマンド、言い直し」→ 直前の入力を取り消す
-- 句読点整形: 「こんにちはまる」→「こんにちは。」（「まるで違う」はそのまま）
-- すぐ話せる: Quick Settings タイル、または「起動したらすぐ話す」設定
-- 連続音声入力: 停止するまで発話ごとに自動で聞き取りを再開（既定で有効）
-- 逐次表示: 話している間も認識中のテキストを画面に表示（設定で区切りごとの先行入力を選べる）
-- 誤変換対策: 認識方式（端末内／システム既定）と無音判定の長さを選べ、開発用語辞書（GitHub・Codex・SQL・Go など）で表記を補正
-- ひらがな入力: 漢字に変換せず読みのまま入力できる（AI への指示書き向け・オプトイン）
-- 触覚フィードバック: 話し始められる状態で1回、聞き取り終了で2回振動
-- カスタムコマンド: 「コマンド、AIに送信」→ Ctrl+Enter などをアプリから登録
-- Bluetooth イヤホンは Windows の音声出力のまま使える（仮想マイク不要）
+Android スマホを、同じ LAN の Windows PC の「音声入力キーボード」にするアプリ。
 
-## ダウンロード
+[![CI](https://github.com/tonbiattack/instant-mic/actions/workflows/ci.yml/badge.svg)](https://github.com/tonbiattack/instant-mic/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tonbiattack/instant-mic)](https://github.com/tonbiattack/instant-mic/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Android%208.0%2B%20%7C%20Windows%2010%2F11-lightgrey)](#ダウンロード)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.2-7F52FF?logo=kotlin&logoColor=white)](android)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+
+スマホに向かって話すと、PC の入力欄にそのまま文字が入ります。音声は認識サービス以外へ送らず、PC 側では認証済みの操作だけを受け付けます。
+
+<p align="center">
+  <img src="docs/images/screenshot-main.png" width="420" alt="Android アプリの画面">
+</p>
+
+## 特長
+
+- **ワンタップで話せる** — 起動即録音、止めるまで連続入力
+- **QR を読むだけでペアリング** — 以後は同じ PC に自動接続
+- **PC 側で直接入力** — `SendInput`（Unicode）を使い、クリップボードを汚さない
+- **コマンドは二重に検証** — スマホと PC の両方で解釈し、片方が壊れても誤爆しない
+- **取り消しは文字数が一致したときだけ** — 推測で消さない
+- **誤変換対策** — 開発用語辞書、ひらがな入力、無音判定の調整
+- **危険な操作は確認** — 送信・削除の前にワンタップ
+
+## 動作環境
+
+| | 要件 |
+| --- | --- |
+| スマホ | Android 8.0 (API 26) 以上 |
+| PC | Windows 10 / 11 (x64) |
+| ネットワーク | 同じ LAN（インターネット不要） |
+
+## インストール
 
 [Releases](https://github.com/tonbiattack/instant-mic/releases) から最新版を取得してください。
 
@@ -67,6 +86,24 @@ QR を読み取れない場合は、PC 画面の6桁コードと IP アドレス
 4. 「コマンド、送信」で Enter、「コマンド、改行」で Shift+Enter、「コマンド、言い直し」で直前の入力を取り消す
 
 連続音声入力では、無音を挟んで話し続けてもそのまま次の発話が入力されます。止めるときだけもう一度タップします。
+
+### 句読点・記号を話して入力する
+
+文章の中で記号の名前を話すと、通常のテキストとして入力できます。
+
+| 話す言葉 | 入力される記号 |
+| --- | --- |
+| まる | 。 |
+| てん | 、 |
+| はてな | ？（全角） |
+| びっくりまーく | ！ |
+| ころん | ： |
+| せみころん | ； |
+| すらっしゅ | / |
+| かっこ 〜 かっことじ | （ 〜 ） |
+| かぎかっこ 〜 かぎかっことじ | 「 〜 」 |
+
+例: 「これで合ってる はてな」→「これで合ってる？」。単独の記号は文末や区切りの位置で変換され、かっこは開きと閉じがそろっているときに変換されます。認識結果によっては変換されない場合があります。
 
 
 仕様: [docs/spec.md](docs/spec.md) / プロトコル: [docs/protocol.md](docs/protocol.md) / 機能提案と採否: [docs/proposals.md](docs/proposals.md) / 設計の評価と比較: [docs/evaluation.md](docs/evaluation.md)

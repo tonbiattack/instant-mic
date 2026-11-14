@@ -1,0 +1,39 @@
+name: 機能提案
+description: こうなってほしい、という提案
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 機能ではなく、解決したい状況を書いてください
+      placeholder: 長い文章を話すと、途中で区切られてしまう
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案する解決方法
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 検討した代替案
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影響する範囲
+      multiple: true
+      options:
+        - Android アプリ
+        - Windows 受信アプリ
+        - プロトコル（両方の変更が必要）
+        - ドキュメントのみ
+    validations:
+      required: true

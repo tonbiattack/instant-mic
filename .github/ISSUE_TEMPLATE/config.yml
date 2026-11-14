@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: セキュリティ上の問題
+    url: https://github.com/tonbiattack/instant-mic/security/advisories/new
+    about: 公開の Issue に書かず、こちらから非公開で報告してください
+  - name: 使い方の質問
+    url: https://github.com/tonbiattack/instant-mic#readme
+    about: README の導入手順・ペアリング・使い方を先に確認してください
