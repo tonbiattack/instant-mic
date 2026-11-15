@@ -24,6 +24,11 @@ updates:
       # version bump, so major updates are done by hand.
       - dependency-name: "com.android.application"
         update-types: ["version-update:semver-major"]
+      # AGP and the Gradle wrapper have to move together: Gradle 9.6+ removes an
+      # internal API that AGP 8.x still uses, so a wrapper-only bump breaks the
+      # build (#45). Gradle major updates are part of the AGP migration.
+      - dependency-name: "gradle-wrapper"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: github-actions
