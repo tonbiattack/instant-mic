@@ -76,12 +76,23 @@ jobs:
             { echo "### リリースしません"; echo; echo "$1"; } >> "$GITHUB_STEP_SUMMARY"
           }
 
-          # [skip release] は件名、または本文の行頭に置かれたときだけ効かせる。
-          # 本文の途中に書かれた語（この機能自体の説明など）でリリースが
-          # 止まってしまうのを防ぐ。実際に初回の実行でそれが起きた。
+          # [skip release] を「指示」として扱うのは、次のいずれかのときだけ:
+          #   - 件名の先頭、または末尾にある
+          #   - 本文に、その行だけの行として置かれている
+          # 文中に語として出てくるだけでは止めない。この機能自体の説明や、
+          # この判定を直すコミットの件名で誤検知した実例があるため。
           subject="${MESSAGE%%$'\n'*}"
-          if [ "$EVENT" = "push" ] && { grep -qF '[skip release]' <<< "$subject" \
-            || grep -qE '^\[skip release\]' <<< "${MESSAGE:-}"; }; then
+          subject="${subject%"${subject##*[![:space:]]}"}"  # 末尾の空白を落とす
+          skip_requested=false
+          case "$subject" in
+            '[skip release]'|'[skip release]'*) skip_requested=true ;;
+            *'[skip release]') skip_requested=true ;;
+          esac
+          if [ "$skip_requested" = false ] \
+            && grep -qxF '[skip release]' <<< "${MESSAGE:-}"; then
+            skip_requested=true
+          fi
+          if [ "$EVENT" = "push" ] && [ "$skip_requested" = true ]; then
             skip "[skip release] が指定されています"
             exit 0
           fi
