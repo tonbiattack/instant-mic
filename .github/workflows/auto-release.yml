@@ -1,0 +1,201 @@
+# main にマージされたら、バージョンを自動で決めてタグと Release を作る。
+#
+# 流れ:
+#   1. 直前のタグからの変更を見て、次のバージョンを決める
+#      （破壊的変更 → major、feat → minor、それ以外 → patch）
+#   2. release.yml を呼び、ビルド・署名・Release 公開まで実行する
+#   3. release.yml がそのコミットにタグを作る
+#      （GITHUB_TOKEN が作ったタグはワークフローを再起動しないので、ループしない）
+#
+# リリースしたくない変更（ドキュメントや CI だけのマージ）は、
+# 変更ファイルがドキュメント類だけなら自動でスキップする。
+# 明示的に飛ばしたいときはコミットメッセージに [skip release] を入れる。
+#
+# 手元でタグを打つこれまでの手順も引き続き使える（release.yml が直接動く）。
+name: Auto release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "バージョンの上げ方（auto はコミットから判定）"
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      force:
+        description: "ドキュメントだけの変更でもリリースする"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    name: Decide next version
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.next.outputs.release }}
+      version: ${{ steps.next.outputs.version }}
+      reason: ${{ steps.next.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 直前のタグを探すため、履歴とタグをすべて取得する。
+          fetch-depth: 0
+          # タグを取ってくる（既定ではタグが浅く取られないことがある）。
+          fetch-tags: true
+
+      - name: Compute next version
+        id: next
+        env:
+          EVENT: ${{ github.event_name }}
+          BUMP: ${{ inputs.bump }}
+          FORCE: ${{ inputs.force }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          skip() {
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "reason=$1" >> "$GITHUB_OUTPUT"
+            echo "リリースしません: $1"
+            { echo "### リリースしません"; echo; echo "$1"; } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # マージコミットの本文に [skip release] があれば何もしない。
+          if [ "$EVENT" = "push" ] && grep -qF '[skip release]' <<< "${MESSAGE:-}"; then
+            skip "[skip release] が指定されています"
+            exit 0
+          fi
+
+          # 以下 2 つのガードは push のときだけ効かせる。
+          # 手動実行は「今すぐ出したい」という明示的な指示なので、
+          # タグ済み・ドキュメントのみでもそのまま進める。
+          if [ "$EVENT" = "push" ] \
+            && existing="$(git describe --tags --exact-match --match 'v*' HEAD 2>/dev/null)"; then
+            # 同じコミットに既にタグがあるなら、二重リリースになるので止める。
+            skip "HEAD には既にタグ $existing があります"
+            exit 0
+          fi
+
+          # 直前の「v<major>.<minor>.<patch>」タグを選ぶ。rc などの接尾辞付き
+          # タグを拾うと、次のバージョン計算が壊れるため除外する。
+          prev=""
+          while read -r candidate; do
+            [ -n "$candidate" ] || continue
+            case "$candidate" in
+              v[0-9]*.[0-9]*.[0-9]*)
+                if grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$candidate"; then
+                  prev="$candidate"
+                  break
+                fi
+                ;;
+            esac
+          done <<< "$(git tag --merged HEAD --sort=-v:refname --list 'v*')"
+
+          if [ -n "$prev" ]; then
+            range="$prev..HEAD"
+            echo "前回のタグ: $prev"
+          else
+            range="HEAD"
+            echo "前回のタグはありません（初回リリース）"
+          fi
+
+          # ドキュメントや CI だけのマージではリリースを作らない。
+          # バージョン番号と Release が無駄に増えるのを防ぐ。
+          if [ "$EVENT" = "push" ] && [ -n "$prev" ] && [ "${FORCE:-false}" != "true" ]; then
+            files="$(git diff --name-only "$prev..HEAD")"
+            if [ -z "$files" ]; then
+              skip "前回のタグからの変更がありません"
+              exit 0
+            fi
+            # 判定はパイプの途中で打ち切らないよう、いったん変数に受ける。
+            # （pipefail 下で `grep -q` を末尾に置くと、上流が SIGPIPE で
+            #   141 になり、一致していても失敗扱いになることがある）
+            relevant="$(printf '%s\n' "$files" \
+              | grep -Ev '^(docs/|\.github/|licenses/)' \
+              | grep -Ev '(^|/)[^/]*\.(md|txt)$|^(LICENSE[^/]*|\.gitignore|\.gitattributes)$|^(\.[^/]+)$' \
+              || true)"
+            if [ -z "$relevant" ]; then
+              skip "変更がドキュメント・CI のみです（force で強制できます）"
+              exit 0
+            fi
+          fi
+
+          logs="$(git log --no-merges --pretty=format:'%s%n%b%n---' "$range")"
+
+          # herestring を使う（パイプだと pipefail 下で SIGPIPE を拾う）
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "${BUMP:-auto}" != "auto" ]; then
+            kind="$BUMP"
+          elif grep -Eq '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE:' <<< "$logs"; then
+            kind="major"
+          elif grep -Eq '^feat(\(.+\))?:' <<< "$logs"; then
+            kind="minor"
+          else
+            kind="patch"
+          fi
+
+          if [ -z "$prev" ]; then
+            next="0.1.0"
+            kind="initial"
+          else
+            semver="${prev#v}"
+            IFS='.' read -r major minor patch <<< "$semver"
+            major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+            # 0.x の間は major を上げず minor を上げる。利用者にとっては
+            # まだ互換性の保証が無く、1.0.0 に早く到達させたくないため。
+            if [ "$kind" = "major" ] && [ "$major" -eq 0 ]; then
+              kind="minor"
+            fi
+            case "$kind" in
+              major) major=$(( major + 1 )); minor=0; patch=0 ;;
+              minor) minor=$(( minor + 1 )); patch=0 ;;
+              patch) patch=$(( patch + 1 )) ;;
+            esac
+            # release.yml は minor/patch が 99 以下であることを要求する。
+            if [ "$minor" -ge 100 ] || [ "$patch" -ge 100 ]; then
+              echo "::error::バージョンが 99 を超えました。手動で major を上げてください"
+              exit 1
+            fi
+            next="$major.$minor.$patch"
+          fi
+
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "reason=$kind" >> "$GITHUB_OUTPUT"
+          echo "次のバージョン: v$next（$kind）"
+
+          {
+            echo "### 次のリリース"
+            echo
+            echo "- バージョン: \`v$next\`"
+            echo "- 前回: \`${prev:-なし}\`"
+            echo "- 判定: \`$kind\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: v${{ needs.plan.outputs.version }}
+      draft: false
+      create_tag: true
+    secrets: inherit
