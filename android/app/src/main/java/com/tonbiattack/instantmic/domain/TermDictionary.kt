@@ -51,7 +51,9 @@ object TermDictionary {
      * mishearings were observed with the system recognizer set to `ja-JP`.
      */
     val builtIn: List<Term> = listOf(
-        Term("GitHub", listOf("ギットハブ"), fixCase = true),
+        // Mishearings after ギットハブ: the recogniser often drops the ッ and
+        // turns ハ into バ, so 「ギターボ」/「ギターハ」 reach the dictionary.
+        Term("GitHub", listOf("ギットハブ", "ギターハブ", "ギターボ", "ギターハ"), fixCase = true),
         Term("Git", listOf("ギット")),
         Term("Codex", listOf("コーデックス", "こーでっくす"), fixCase = true),
         Term("SQL", listOf("エスキューエル", "シーケル"), fixCase = true),

@@ -753,7 +753,7 @@ private fun CommandsPanel(
 
         SettingSwitch(
             title = "ひらがなで入力する",
-            description = "漢字に変換せず、読みのまま入力します（「改行」と「開業」のような変換ミスがなくなります）。AI への指示書き向け。英数字・URL・記号はそのまま残ります。",
+            description = "漢字に変換せず、読みのまま入力します（「改行」と「開業」のような変換ミスがなくなります）。AI への指示書き向け。カタカナ・英数字・URL・記号はそのまま残ります。",
             checked = state.hiraganaOutput,
             onChange = onHiraganaChange,
         )

@@ -130,6 +130,15 @@ class TermDictionaryTest {
     }
 
     @Test
+    fun `misheard GitHub variants are corrected`() {
+        // Real device case: 「GitHub シークレット」 came back as
+        // 「ギターボシークレット」, which used to reach the output unchanged.
+        assertEquals("GitHubシークレット", TermDictionary.correct("ギターボシークレット"))
+        assertEquals("GitHubのリポジトリ", TermDictionary.correct("ギターハブのリポジトリ"))
+        assertEquals("GitHub", TermDictionary.correct("ギターハ"))
+    }
+
+    @Test
     fun `dictionary can be disabled by passing no terms`() {
         assertEquals("ギットハブ", TermDictionary.correct("ギットハブ", terms = emptyList()))
     }

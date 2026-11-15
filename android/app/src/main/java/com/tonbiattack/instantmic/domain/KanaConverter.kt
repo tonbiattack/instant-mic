@@ -6,8 +6,13 @@ package com.tonbiattack.instantmic.domain
  *
  * Rationale: the recognizer's *kanji choice* is the main source of errors
  * (「改行」 vs 「開業」). Removing kanji removes that whole class of mistake, and a
- * large language model reads hiragana as easily as kanji. Katakana is folded too,
- * so the output is one consistent script.
+ * large language model reads hiragana as easily as kanji.
+ *
+ * **Katakana is kept.** An earlier version folded it too, which made a
+ * misrecognition unreadable: 「GitHub シークレット」 misheard as
+ * 「ギターボシークレット」 became 「ぎたーぶしーくれっと」 and the speaker could no
+ * longer tell what was said. Katakana words are usually loanwords whose reading
+ * is the spelling, so keeping them costs nothing and preserves recognisability.
  *
  * Everything else is preserved on purpose:
  *
@@ -55,28 +60,42 @@ class KanaConverter(private val analyser: TokenAnalyser? = KuromojiAnalyser()) {
     private fun convertRun(run: String): String {
         val tokens = analyser?.tokens(run)
         // A failed load or an empty analysis must not lose text.
-        if (tokens == null || tokens.isEmpty()) return KanaConverterText.katakanaToHiragana(run)
+        if (tokens == null || tokens.isEmpty()) return run
         val shaped = tokens.joinToString("") { it.surface }
-        if (shaped != run) return KanaConverterText.katakanaToHiragana(run)
+        // The analyser must reproduce the input exactly; if it does not, its
+        // readings cannot be trusted for this run.
+        if (shaped != run) return run
 
         val out = StringBuilder(run.length + 8)
         for (token in tokens) {
-            val reading = token.reading?.takeIf { it.isNotBlank() }
-            if (reading != null && KanaConverterText.hasKanji(token.surface)) {
-                out.append(KanaConverterText.katakanaToHiragana(reading))
-            } else {
-                out.append(KanaConverterText.katakanaToHiragana(token.surface))
+            val surface = token.surface
+            when {
+                // A word without kanji is already readable: katakana stays
+                // katakana, so a misheard loanword is still recognisable.
+                !KanaConverterText.hasKanji(surface) -> out.append(surface)
+
+                // Kanji: replace with its reading (kuromoji gives katakana), then
+                // fold that reading to hiragana. An unknown reading ("*") means
+                // the word is not in the dictionary, so keep the surface rather
+                // than inventing something.
+                else -> {
+                    val reading = token.reading?.takeIf { it.isNotBlank() }
+                    out.append(
+                        if (reading != null) KanaConverterText.katakanaToHiragana(reading) else surface,
+                    )
+                }
             }
         }
         return out.toString()
     }
 
     /**
-     * True for Japanese script that should be converted.
+     * True for Japanese script that takes part in a convertible run.
      *
-     * Kanji and katakana are converted; hiragana already is what we want.
-     * ASCII, digits and symbols are boundaries: a URL or an identifier is never
-     * partially converted.
+     * Kanji is what gets rewritten; hiragana and katakana are included so a run
+     * spans whole words (kuromoji needs that context to give the right reading
+     * for kanji next to them). ASCII, digits and symbols are boundaries: a URL
+     * or an identifier is never partially analysed.
      */
     private fun isConvertible(cp: Int): Boolean = when (Character.UnicodeScript.of(cp)) {
         Character.UnicodeScript.HAN,
