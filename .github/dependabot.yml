@@ -29,6 +29,11 @@ updates:
       # build (#45). Gradle major updates are part of the AGP migration.
       - dependency-name: "gradle-wrapper"
         update-types: ["version-update:semver-major"]
+      # OkHttp 5.x requires compileSdk 37, but the app targets 36 (#54). Bumping
+      # compileSdk is a deliberate step (new platform APIs, lint rules), so it
+      # is not something a dependency PR should force.
+      - dependency-name: "com.squareup.okhttp3:*"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: github-actions
