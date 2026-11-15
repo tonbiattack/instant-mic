@@ -122,6 +122,15 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v4
       - uses: gradle/actions/setup-gradle@v4
+      # Robolectric fetches an Android runtime from Maven Central on first use.
+      # Without this cache a release run downloads it every time, and a single
+      # transient network error fails the job before any test runs (v0.3.0 hit
+      # exactly that: ActionStatusTest > classMethod, MavenArtifactFetcher).
+      # Same key as ci.yml so the two workflows share one cache entry.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ runner.os }}-4.17
       - name: Test
         run: |
           chmod +x gradlew
