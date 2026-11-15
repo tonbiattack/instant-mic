@@ -30,6 +30,8 @@ type Menu struct {
 	AutostartOn func() bool
 	// OnToggleAutostart flips the login-startup registration.
 	OnToggleAutostart func() error
+	// OnReady runs once the icon exists, so the initial tooltip can be set.
+	OnReady func()
 }
 
 // Run starts the tray loop and blocks until the user quits. It must be called
@@ -111,6 +113,11 @@ func onReady(m Menu) {
 		})
 	}
 	quitItem.Click(quit)
+
+	if m.OnReady != nil {
+		// Runs last so every menu item exists before the first tooltip update.
+		m.OnReady()
+	}
 }
 
 // iconData builds a 16x16 ICO at runtime: a teal rounded square with a white
