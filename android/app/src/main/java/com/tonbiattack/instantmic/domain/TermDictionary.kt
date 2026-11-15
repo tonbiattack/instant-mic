@@ -51,7 +51,14 @@ object TermDictionary {
      * mishearings were observed with the system recognizer set to `ja-JP`.
      */
     val builtIn: List<Term> = listOf(
-        Term("GitHub", listOf("ギットハブ"), fixCase = true),
+        // Mishearings after ギットハブ: the recogniser often drops the ッ and
+        // turns ハ into バ, so 「ギターボ」/「ギターハ」 reach the dictionary.
+        //
+        // These only fire when the mishearing stands alone: 「ギターボ
+        // シークレット」 keeps its neighbour, because a following katakana means
+        // the match is part of a longer word (the rule that protects 「ゴール」).
+        // That case is handled by keeping katakana in the kana converter.
+        Term("GitHub", listOf("ギットハブ", "ギターハブ", "ギターボ", "ギターハ"), fixCase = true),
         Term("Git", listOf("ギット")),
         Term("Codex", listOf("コーデックス", "こーでっくす"), fixCase = true),
         Term("SQL", listOf("エスキューエル", "シーケル"), fixCase = true),

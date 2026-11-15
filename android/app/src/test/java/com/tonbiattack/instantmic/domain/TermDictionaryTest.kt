@@ -130,6 +130,18 @@ class TermDictionaryTest {
     }
 
     @Test
+    fun `misheard GitHub variants are corrected at word boundaries`() {
+        // The mishearing must stand alone as a word: a following katakana means
+        // it is part of a longer word, which protects 「ゴール」 from 「ゴー」.
+        // 「ギターボシークレット」 therefore stays as-is; the katakana-preserving
+        // converter keeps it readable instead.
+        assertEquals("ギターボシークレット", TermDictionary.correct("ギターボシークレット"))
+
+        assertEquals("GitHubのリポジトリ", TermDictionary.correct("ギターボのリポジトリ"))
+        assertEquals("GitHub", TermDictionary.correct("ギターハ"))
+    }
+
+    @Test
     fun `dictionary can be disabled by passing no terms`() {
         assertEquals("ギットハブ", TermDictionary.correct("ギットハブ", terms = emptyList()))
     }
