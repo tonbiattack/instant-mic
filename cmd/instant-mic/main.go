@@ -146,12 +146,17 @@ func run(args []string) error {
 
 	if *trayMode {
 		// The tray has no console; status is visible from the icon menu.
-		return runTray(srv, store, *pairTTL, *showPair)
+		//
+		// A fresh install has no paired phone, so opening pairing automatically
+		// removes the "start the app, press p, find the QR" step. Once a phone is
+		// paired the receiver stays quiet and reconnects on its own.
+		autoPair := *showPair || len(store.Devices()) == 0
+		return runTray(srv, store, *pairTTL, autoPair)
 	}
 
 	if !*trayMode {
 		printBanner(srv, store, tlsConf != nil, fingerprint)
-		if *showPair {
+		if *showPair || len(store.Devices()) == 0 {
 			openPairing(srv, *pairTTL, *verbose)
 		}
 	}

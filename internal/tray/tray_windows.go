@@ -25,6 +25,11 @@ type Menu struct {
 	OnCancel func()
 	// OnQuit stops the receiver.
 	OnQuit func()
+
+	// AutostartOn reports whether the receiver starts at login.
+	AutostartOn func() bool
+	// OnToggleAutostart flips the login-startup registration.
+	OnToggleAutostart func() error
 }
 
 // Run starts the tray loop and blocks until the user quits. It must be called
@@ -48,6 +53,17 @@ func onReady(m Menu) {
 	pairItem := systray.AddMenuItem(m.PairLabel, "ペアリングを開始")
 	qrItem := systray.AddMenuItem("QRコードを表示", "表示中のペアリングQRを再表示")
 	cancelItem := systray.AddMenuItem("ペアリングを中止", "開いているペアリングを中止")
+
+	var autostartItem *systray.MenuItem
+	if m.OnToggleAutostart != nil {
+		systray.AddSeparator()
+		autostartItem = systray.AddMenuItemCheckbox(
+			"ログイン時に起動",
+			"Windows へのログイン時に自動で常駐します",
+			m.AutostartOn != nil && m.AutostartOn(),
+		)
+	}
+
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("終了", "受信アプリを終了")
 
@@ -76,6 +92,24 @@ func onReady(m Menu) {
 			m.OnCancel()
 		}
 	})
+	if autostartItem != nil {
+		autostartItem.Click(func() {
+			if m.OnToggleAutostart == nil {
+				return
+			}
+			if err := m.OnToggleAutostart(); err != nil {
+				return
+			}
+			// Re-read the state instead of assuming the flip worked: the
+			// registration can fail (read-only profile, group policy), and the
+			// check mark must reflect reality.
+			if m.AutostartOn != nil && m.AutostartOn() {
+				autostartItem.Check()
+			} else {
+				autostartItem.Uncheck()
+			}
+		})
+	}
 	quitItem.Click(quit)
 }
 
@@ -156,4 +190,10 @@ func pixelAt(x, y, size int) (b, g, r, a byte) {
 		return 255, 255, 255, 255
 	}
 	return 0x8a, 0x6b, 0x14, 255 // teal-ish (#146b8a)
+}
+
+// UpdateTooltip replaces the hover text, used to show the live status.
+func UpdateTooltip(text string) {
+	defer func() { _ = recover() }()
+	systray.SetTooltip(text)
 }
