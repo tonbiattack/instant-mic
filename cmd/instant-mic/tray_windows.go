@@ -4,9 +4,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/tonbiattack/instant-mic/internal/autostart"
@@ -35,7 +32,9 @@ func runTray(srv *server.Server, store *config.Store, ttl time.Duration, openPai
 	if openPairingAtStart {
 		showPairing()
 	}
-	refreshStatus(srv, store)
+	// The tooltip is refreshed from the tray's ready callback instead of here:
+	// systray rejects updates before the icon exists, which logged a warning at
+	// startup for no benefit.
 
 	tray.Run(tray.Menu{
 		PairLabel: "ペアリングを開始",
@@ -65,6 +64,11 @@ func runTray(srv *server.Server, store *config.Store, ttl time.Duration, openPai
 				quitOnce = true
 				close(quit)
 			}
+		},
+		OnReady: func() {
+			// Called once the icon exists, which is the first moment the
+			// tooltip can be set.
+			refreshStatus(srv, store)
 		},
 	})
 	<-quit
@@ -106,16 +110,11 @@ func waitForPairingAndNotify(srv *server.Server, store *config.Store, quit <-cha
 	}()
 }
 
-// openQRImage writes the QR as a PNG and opens it with the default viewer. The
-// file is overwritten on purpose: only the newest (still valid) QR is useful.
+// openQRImage shows the pairing QR in our own window.
+//
+// A shell viewer opened a separate app that could land behind other windows and
+// had to be closed by hand. Our window comes to the front, shows the code beside
+// the QR, and is closed when pairing finishes.
 func openQRImage(payload server.QRPayload, code string) {
-	png, err := payload.QRPNG(256)
-	if err != nil {
-		return
-	}
-	path := filepath.Join(os.TempDir(), "instant-mic-pairing.png")
-	if err := os.WriteFile(path, png, 0o600); err != nil {
-		return
-	}
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", path).Start()
+	showPairingWindow(payload, code)
 }
