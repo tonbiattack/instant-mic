@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -56,6 +57,7 @@ import com.tonbiattack.instantmic.domain.KeySequence
 import com.tonbiattack.instantmic.domain.TermDictionary
 import com.tonbiattack.instantmic.domain.TextShaper
 import com.tonbiattack.instantmic.net.ConnectionState
+import com.tonbiattack.instantmic.net.PairCandidate
 import com.tonbiattack.instantmic.net.ReconnectPolicy
 import com.tonbiattack.instantmic.speech.IncrementalMode
 import com.tonbiattack.instantmic.speech.RecognitionAlternative
@@ -79,6 +81,8 @@ object TestTags {
     const val COMMAND_SAVE = "command_save"
     const val LIVE_TRANSCRIPT = "live_transcript"
     const val TARGET_WINDOW = "target_window"
+    const val REQUEST_PAIR = "request_pair"
+    const val PAIR_REQUEST_WAITING = "pair_request_waiting"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,6 +93,14 @@ fun MainScreen(
 ) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     var showCommands by rememberSaveable { mutableStateOf(false) }
+
+    // The pairing screen has nothing stored to reconnect to, so start looking
+    // for PCs as soon as it is shown; that is what makes one-tap pairing work.
+    LaunchedEffect(state.pairing) {
+        if (state.pairing == null) {
+            viewModel.startPairingDiscovery()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -129,6 +141,7 @@ fun MainScreen(
                     onQRScanned = viewModel::pairWithQR,
                     onConfirmPending = viewModel::confirmPendingPairing,
                     onDismissPending = viewModel::dismissPendingPairing,
+                    onRequestPairing = viewModel::requestPairing,
                 )
             } else if (showCommands) {
                 CommandsPanel(
@@ -1089,6 +1102,7 @@ private fun PairingPanel(
     onQRScanned: (String) -> Unit,
     onConfirmPending: () -> Unit,
     onDismissPending: () -> Unit,
+    onRequestPairing: (PairCandidate) -> Unit,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("8765") }
@@ -1101,9 +1115,66 @@ private fun PairingPanel(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.titleLarge)
         Text(
-            "PCで受信アプリを起動し [p] を押すと、QRコードが表示されます。読み取るだけで接続できます。",
+            "同じ Wi-Fi 上の PC は下に自動で表示されます。タップすると PC 側に確認が出るので、PC の画面で「許可」を押してください。",
             style = MaterialTheme.typography.bodyMedium,
         )
+
+        // One-tap pairing: discovered PCs are listed directly, because asking the
+        // PC is far less work than showing a QR and scanning it.
+        val discovered = (state.discovery as? DiscoveryState.Found)?.receivers.orEmpty()
+        if (discovered.isNotEmpty() && !state.pairRequestInProgress) {
+            Text("見つかったPC", style = MaterialTheme.typography.titleSmall)
+            for (receiver in discovered) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onRequestPairing(
+                                PairCandidate(
+                                    host = receiver.host,
+                                    port = receiver.port,
+                                    serverName = receiver.serverName,
+                                    fingerprint = receiver.fingerprint,
+                                ),
+                            )
+                        }
+                        .testTag(TestTags.REQUEST_PAIR),
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text(receiver.serverName, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "${receiver.host}:${receiver.port} — タップしてペアリングを依頼",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+
+        if (state.pairRequestInProgress) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.size(10.dp))
+                        Text(
+                            state.pairRequestMessage ?: "PC で承認を待っています…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag(TestTags.PAIR_REQUEST_WAITING),
+                        )
+                    }
+                    Text(
+                        "PC の画面に出る確認で「許可」を押すと、そのまま接続します。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+
+        Text("または", style = MaterialTheme.typography.bodySmall)
 
         val pending = state.pendingPairing
         if (pending != null) {

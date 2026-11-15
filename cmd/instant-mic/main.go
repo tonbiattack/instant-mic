@@ -138,6 +138,8 @@ func run(args []string) error {
 		Logger:      logger,
 		Fingerprint: fingerprint,
 		Advertise:   advertiseFlag(!cfg.DisableDiscovery),
+		// Phone-initiated pairing: see pairRequestApprover.
+		OnPairRequest: pairRequestApprover(*trayMode),
 	})
 	if err := srv.Start(listen); err != nil {
 		return fmt.Errorf("listen on %s: %w", listen, err)
