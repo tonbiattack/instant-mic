@@ -194,7 +194,7 @@ jobs:
       # transient network error fails the job before any test runs (v0.3.0 hit
       # exactly that: ActionStatusTest > classMethod, MavenArtifactFetcher).
       # Same key as ci.yml so the two workflows share one cache entry.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-${{ runner.os }}-4.17
