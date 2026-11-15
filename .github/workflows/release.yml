@@ -121,7 +121,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v4
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       # Robolectric fetches an Android runtime from Maven Central on first use.
       # Without this cache a release run downloads it every time, and a single
       # transient network error fails the job before any test runs (v0.3.0 hit
