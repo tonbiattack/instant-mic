@@ -15,6 +15,9 @@ import com.tonbiattack.instantmic.net.ConnectionState
 import com.tonbiattack.instantmic.net.DeliveryResult
 import com.tonbiattack.instantmic.net.DiscoveryClient
 import com.tonbiattack.instantmic.net.DiscoveredReceiver
+import com.tonbiattack.instantmic.net.PairCandidate
+import com.tonbiattack.instantmic.net.PairRequestClient
+import com.tonbiattack.instantmic.net.PairAskResult
 import com.tonbiattack.instantmic.net.PairingClient
 import com.tonbiattack.instantmic.net.PairingException
 import com.tonbiattack.instantmic.net.ReconnectPolicy
@@ -97,6 +100,10 @@ data class UiState(
     val qrScanInProgress: Boolean = false,
     /** A QR scanned by another app, waiting for the user's confirmation. */
     val pendingPairing: PairingPayload? = null,
+    /** A pairing request is waiting for the person at the PC to approve it. */
+    val pairRequestInProgress: Boolean = false,
+    /** Human-readable note about the pairing request (waiting, denied, …). */
+    val pairRequestMessage: String? = null,
     /** Live, unconfirmed recognizer text for the current session. */
     val liveTranscript: LiveTranscript? = null,
 
@@ -137,6 +144,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val speech = SpeechRecognizerController(app, viewModelScope)
     private val remote = RemoteClient(viewModelScope)
     private val pairingClient = PairingClient()
+    private val pairRequestClient = PairRequestClient()
     private val haptics = Haptics(app)
     private val discoveryClient = DiscoveryClient(app)
 
@@ -604,6 +612,141 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setQrScanInProgress(inProgress: Boolean) {
         _ui.value = _ui.value.copy(qrScanInProgress = inProgress)
+    }
+
+    /**
+     * Starts looking for receivers to pair with.
+     *
+     * Discovery is normally started only once a PC is paired, to reconnect. On
+     * the pairing screen there is nothing stored yet, so the search has to be
+     * started explicitly. It is idempotent: calling it again while already
+     * searching does nothing.
+     */
+    fun startPairingDiscovery() {
+        if (_ui.value.pairing != null) return
+        val state = _ui.value.discovery
+        if (state is DiscoveryState.Searching || state is DiscoveryState.Found) return
+        discovery.startForPairing()
+    }
+
+    /**
+     * Asks a discovered PC to pair, without a QR or a code.
+     *
+     * The receiver shows a prompt on the PC; someone there has to approve it.
+     * That is what keeps this safe: the request itself grants nothing.
+     */
+    fun requestPairing(candidate: PairCandidate) {
+        if (_ui.value.pairRequestInProgress) return
+        _ui.value = _ui.value.copy(
+            pairRequestInProgress = true,
+            pairingError = null,
+            pairRequestMessage = "PC で承認を待っています…",
+        )
+        viewModelScope.launch {
+            val existing = settings.current().pairing
+            val deviceId = existing?.deviceId ?: DeviceIds.newId()
+            val deviceName = android.os.Build.MODEL ?: "Android"
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    pairRequestClient.request(
+                        candidate = candidate,
+                        deviceId = deviceId,
+                        deviceName = deviceName,
+                        onWaiting = {
+                            // The first poll starts only after the PC accepted the
+                            // request, so this is when the prompt is really up.
+                            _ui.value = _ui.value.copy(
+                                pairRequestMessage = "PC の画面で「許可」を押してください",
+                            )
+                        },
+                    )
+                } catch (e: Exception) {
+                    PairAskResult.Failed(e.message ?: "ペアリング要求に失敗しました")
+                }
+            }
+
+            when (result) {
+                is PairAskResult.Approved -> {
+                    _ui.value = _ui.value.copy(
+                        pairRequestMessage = "承認されました。接続しています…",
+                    )
+                    completePairingFromRequest(candidate, result.secret, deviceId, deviceName)
+                }
+
+                PairAskResult.Denied -> _ui.value = _ui.value.copy(
+                    pairRequestInProgress = false,
+                    pairRequestMessage = null,
+                    pairingError = "PC 側で拒否されました。PC の画面で許可してください。",
+                )
+
+                PairAskResult.Expired -> _ui.value = _ui.value.copy(
+                    pairRequestInProgress = false,
+                    pairRequestMessage = null,
+                    pairingError = "承認されませんでした。PC の画面を確認して、もう一度試してください。",
+                )
+
+                PairAskResult.Unsupported -> _ui.value = _ui.value.copy(
+                    pairRequestInProgress = false,
+                    pairRequestMessage = null,
+                    pairingError = "PC の受信アプリが古いため、この方法を使えません。QR コードでペアリングしてください。",
+                )
+
+                is PairAskResult.Failed -> _ui.value = _ui.value.copy(
+                    pairRequestInProgress = false,
+                    pairRequestMessage = null,
+                    pairingError = result.message,
+                )
+            }
+        }
+    }
+
+    private suspend fun completePairingFromRequest(
+        candidate: PairCandidate,
+        secret: String,
+        deviceId: String,
+        deviceName: String,
+    ) {
+        try {
+            val result = withContext(Dispatchers.IO) {
+                pairingClient.pair(
+                    host = candidate.host,
+                    port = candidate.port,
+                    code = "",
+                    deviceId = deviceId,
+                    deviceName = deviceName,
+                    fingerprintHint = candidate.fingerprint,
+                    qrSecret = secret,
+                )
+            }
+            val pairing = Pairing(
+                deviceId = deviceId,
+                token = result.token,
+                host = candidate.host,
+                port = candidate.port,
+                serverName = result.serverName.ifEmpty { candidate.serverName },
+                serverId = result.serverId,
+                certificateFingerprint = result.certificateFingerprint,
+                commandPrefix = result.commandPrefix,
+            )
+            _ui.value = _ui.value.copy(pairRequestInProgress = false, pairRequestMessage = null)
+            completePairing(pairing)
+        } catch (e: PairingException) {
+            _ui.value = _ui.value.copy(
+                pairRequestInProgress = false,
+                pairRequestMessage = null,
+                pairingError = e.message ?: "ペアリングに失敗しました",
+            )
+        } catch (e: Exception) {
+            _ui.value = _ui.value.copy(
+                pairRequestInProgress = false,
+                pairRequestMessage = null,
+                pairingError = "ペアリングに失敗しました: ${e.message ?: "不明なエラー"}",
+            )
+        }
+    }
+
+    fun dismissPairRequestMessage() {
+        _ui.value = _ui.value.copy(pairRequestMessage = null)
     }
 
     /** Re-runs discovery for the stored PC and reconnects if it moved. */

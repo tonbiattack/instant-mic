@@ -90,6 +90,33 @@ class DiscoveryCoordinator(
         publish(DiscoveryState.Off)
     }
 
+    /**
+     * Searches for any receiver, for the pairing screen.
+     *
+     * Unlike [start] there is no stored server to match against, so every
+     * resolved receiver is reported and none is auto-connected. The user picks
+     * one and the PC asks for confirmation.
+     */
+    fun startForPairing() {
+        stop()
+        publish(DiscoveryState.Searching)
+        job = scope.launch {
+            val seen = mutableListOf<DiscoveredReceiver>()
+            try {
+                discovery.discover().collect { receiver ->
+                    if (seen.none { it.serverId == receiver.serverId && it.host == receiver.host }) {
+                        seen += receiver
+                        publish(DiscoveryState.Found(seen.toList()))
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                publish(DiscoveryState.Unavailable(e.message ?: "自動検出を利用できません"))
+            }
+        }
+    }
+
     private fun publish(next: DiscoveryState) {
         _state.value = next
         onState(next)

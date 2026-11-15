@@ -34,6 +34,11 @@ type Config struct {
 	// Advertise controls the mDNS/DNS-SD advertisement. Discovery is on by
 	// default because it never authenticates anything by itself.
 	Advertise *bool
+	// OnPairRequest is called when a phone asks to pair. It must ask the user
+	// and block until they decide, then return true to approve. Leaving it nil
+	// disables phone-initiated pairing (the request is refused), because
+	// approval must always be a human action on the PC.
+	OnPairRequest func(PairRequest) bool
 }
 
 // Event is an observation for the UI log.
@@ -53,6 +58,10 @@ type Server struct {
 	onEvent  func(Event)
 	onClient func(int)
 	dedupe   *dedupe
+
+	// requests holds phone-initiated pairing requests awaiting a decision.
+	requests     *PairRequestStore
+	onPairRequest func(PairRequest) bool
 
 	fingerprint string
 	advertise   bool
@@ -93,18 +102,20 @@ func New(cfg Config) *Server {
 		advertise = *cfg.Advertise
 	}
 	return &Server{
-		store:       cfg.Store,
-		inserter:    cfg.Inserter,
-		tls:         cfg.TLS,
-		log:         logger,
-		pairing:     cfg.Pairing,
-		onEvent:     cfg.OnEvent,
-		onClient:    cfg.OnClients,
-		dedupe:      newDedupe(10*time.Minute, 1024),
-		fingerprint: cfg.Fingerprint,
-		advertise:   advertise,
-		conns:       map[*conn]struct{}{},
-		failures:    map[string]failInfo{},
+		store:         cfg.Store,
+		inserter:      cfg.Inserter,
+		tls:           cfg.TLS,
+		log:           logger,
+		pairing:       cfg.Pairing,
+		onEvent:       cfg.OnEvent,
+		onClient:      cfg.OnClients,
+		dedupe:        newDedupe(10*time.Minute, 1024),
+		fingerprint:   cfg.Fingerprint,
+		advertise:     advertise,
+		requests:      NewPairRequestStore(),
+		onPairRequest: cfg.OnPairRequest,
+		conns:         map[*conn]struct{}{},
+		failures:      map[string]failInfo{},
 	}
 }
 
@@ -158,6 +169,8 @@ func (s *Server) serve(ln net.Listener) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/pair", s.handlePair)
+	mux.HandleFunc(pairRequestPrefix, s.handlePairRequest)
+	mux.HandleFunc(pairRequestPrefix+"/", s.handlePairRequestStatus)
 	mux.HandleFunc("/health", s.handleHealth)
 	srv := &http.Server{
 		Handler:           mux,
