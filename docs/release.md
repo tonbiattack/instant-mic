@@ -20,7 +20,7 @@
 
 | 方法 | 使いどころ |
 | --- | --- |
-| コミットメッセージに `[skip release]` を入れる | 一度だけ飛ばしたい |
+| コミットメッセージの件名、または本文の行頭に `[skip release]` を置く | 一度だけ飛ばしたい |
 | `docs/` `licenses/` `.github/` と `*.md` `*.txt` `LICENSE` だけの変更 | 自動で飛ばる（バージョン番号を無駄に増やさない） |
 | `Actions → Auto release → Run workflow` で `bump` を指定 | 上げ幅を手で決めて出したい |
 
