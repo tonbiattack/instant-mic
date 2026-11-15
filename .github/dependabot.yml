@@ -17,6 +17,13 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # AGP 9.x requires Gradle 9.6+, but Dependabot only edits
+      # libs.versions.toml, so the bump can never apply on its own. Upgrading
+      # AGP is a migration (wrapper, Kotlin, Compose compiler), not a one-line
+      # version bump, so major updates are done by hand.
+      - dependency-name: "com.android.application"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: github-actions
