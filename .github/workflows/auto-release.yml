@@ -76,8 +76,12 @@ jobs:
             { echo "### リリースしません"; echo; echo "$1"; } >> "$GITHUB_STEP_SUMMARY"
           }
 
-          # マージコミットの本文に [skip release] があれば何もしない。
-          if [ "$EVENT" = "push" ] && grep -qF '[skip release]' <<< "${MESSAGE:-}"; then
+          # [skip release] は件名、または本文の行頭に置かれたときだけ効かせる。
+          # 本文の途中に書かれた語（この機能自体の説明など）でリリースが
+          # 止まってしまうのを防ぐ。実際に初回の実行でそれが起きた。
+          subject="${MESSAGE%%$'\n'*}"
+          if [ "$EVENT" = "push" ] && { grep -qF '[skip release]' <<< "$subject" \
+            || grep -qE '^\[skip release\]' <<< "${MESSAGE:-}"; }; then
             skip "[skip release] が指定されています"
             exit 0
           fi
