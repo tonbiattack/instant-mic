@@ -37,7 +37,7 @@ jobs:
       - run: chmod +x gradlew
       # Robolectric downloads an Android runtime on first use; caching it keeps
       # the Compose UI tests fast and offline-safe on later runs.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-${{ runner.os }}-4.17
