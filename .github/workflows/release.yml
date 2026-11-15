@@ -2,8 +2,10 @@ name: Release
 
 # Builds and publishes the Windows receiver and the Android APK.
 #
-# Two ways to run:
-#   - push a tag v*      : builds, then publishes the release automatically
+# Three ways to run:
+#   - push a tag v*      : builds, then publishes the release for that tag
+#   - called from auto-release.yml (workflow_call): publishes the version that
+#     was computed when work landed on main; the tag is created here
 #   - manual dispatch    : builds and uploads a DRAFT release for inspection
 #
 # Nothing is published unless every build step succeeded: the release job only
@@ -20,6 +22,28 @@ on:
         description: "Version label for the draft (e.g. v0.1.0)"
         required: false
         default: "v0.1.0-draft"
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to publish (e.g. v0.3.0)"
+        required: true
+        type: string
+      draft:
+        description: "Publish as a draft instead of a public release"
+        required: false
+        type: boolean
+        default: false
+      create_tag:
+        description: "Create the git tag at the built commit (the tag does not exist yet)"
+        required: false
+        type: boolean
+        default: false
+
+# Never let two releases race: a second run would compute the same versionCode
+# and fail to replace the first release's assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -32,31 +56,74 @@ jobs:
       name: ${{ steps.v.outputs.name }}
       code: ${{ steps.v.outputs.code }}
       draft: ${{ steps.v.outputs.draft }}
+      create_tag: ${{ steps.v.outputs.create_tag }}
     steps:
       - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_CREATE_TAG: ${{ inputs.create_tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            name="${{ inputs.version }}"
+          # A reusable workflow sees the caller's event name, so a non-empty
+          # inputs.version is what identifies the auto-release call.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            name="$INPUT_VERSION"
             draft="true"
+            create_tag=false
+            strict=false
+          elif [ -n "${INPUT_VERSION:-}" ]; then
+            name="$INPUT_VERSION"
+            draft="${INPUT_DRAFT:-false}"
+            create_tag="${INPUT_CREATE_TAG:-false}"
+            strict=true
           else
-            name="${GITHUB_REF_NAME}"
+            name="$REF_NAME"
             draft="false"
+            create_tag=false
+            strict=true
           fi
-          # Android requires a monotonically increasing integer. Derive it from
-          # the semantic part of the tag: v1.2.3 -> 10203.
+
+          # A tag such as v1.2, v1.2.3.4 or v1.2.3-rc1 would silently produce a
+          # wrong versionCode (or publish a prerelease as "latest"), so
+          # releases from a tag or from main must be plain semver.
+          if [ "$strict" = "true" ] && ! grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$name"; then
+            echo "::error::バージョン '$name' は v<major>.<minor>.<patch> 形式ではありません"
+            exit 1
+          fi
+
           semver="${name#v}"
           semver="${semver%%-*}"
+
           major="$(echo "$semver" | cut -d. -f1)"
           minor="$(echo "$semver" | cut -d. -f2)"
           patch="$(echo "$semver" | cut -d. -f3)"
           major="${major:-0}"; minor="${minor:-0}"; patch="${patch:-0}"
+
+          # A draft may carry any label (the default is v0.1.0-draft). If the
+          # label is not numeric, still build it: a draft is never published,
+          # so a placeholder versionCode is harmless.
+          if [ "$strict" = "false" ]; then
+            case "${major}${minor}${patch}" in
+              *[!0-9]*) major=0; minor=0; patch=1 ;;
+            esac
+          fi
+
+          # Android needs a monotonically increasing integer. VersionCode must
+          # stay unique as long as minor/patch stay below 100.
+          if [ "$minor" -ge 100 ] || [ "$patch" -ge 100 ]; then
+            echo "::error::minor と patch は 99 以下にしてください（versionCode が重複します）"
+            exit 1
+          fi
           code=$(( major * 10000 + minor * 100 + patch ))
           if [ "$code" -le 0 ]; then code=1; fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
-          echo "resolved $name (code $code)"
+          echo "create_tag=$create_tag" >> "$GITHUB_OUTPUT"
+          echo "resolved $name (code $code, draft $draft, create_tag $create_tag)"
 
   windows:
     name: Windows receiver
@@ -145,6 +212,7 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/signing"
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+          chmod 600 "$RUNNER_TEMP/signing/release.jks"
           ls -l "$RUNNER_TEMP/signing/release.jks"
       - name: Build signed release APK
         env:
@@ -156,8 +224,6 @@ jobs:
           INSTANT_MIC_VERSION_CODE: ${{ needs.version.outputs.code }}
         run: ./gradlew assembleRelease
       - name: Verify the APK is signed
-        env:
-          INSTANT_MIC_VERSION_NAME: ${{ needs.version.outputs.name }}
         run: |
           APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
           if [ -z "$APK" ]; then echo "::error::APK が見つかりません"; exit 1; fi
@@ -184,6 +250,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Release notes diff against the previous tag, so the whole history
+          # has to be here.
           fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
@@ -226,10 +294,26 @@ jobs:
             echo
             echo "### 変更点"
             echo
-            prev="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+            # Only plain semver tags count as a baseline; a tag like v1.2.3-rc1
+            # would make the diff range nonsense. The tag being published is
+            # skipped so its own commit is not excluded from the notes.
+            prev=""
+            while read -r candidate; do
+              [ -n "$candidate" ] || continue
+              [ "$candidate" = "$NAME" ] && continue
+              if grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$candidate"; then
+                prev="$candidate"
+                break
+              fi
+            done <<< "$(git tag --sort=-v:refname --list 'v*')"
+
             if [ -n "$prev" ]; then
+              echo "\`$prev\` 以降の変更:"
+              echo
               git log --no-merges --pretty=format:'- %s' "$prev"..HEAD
             else
+              echo "初回リリースです。"
+              echo
               git log --no-merges --pretty=format:'- %s' -20
             fi
             echo
@@ -241,10 +325,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NAME: ${{ needs.version.outputs.name }}
           DRAFT: ${{ needs.version.outputs.draft }}
+          CREATE_TAG: ${{ needs.version.outputs.create_tag }}
         run: |
           set -euo pipefail
-          args=("$NAME" artifacts/windows/* artifacts/android/* --title "$NAME" --notes-file notes.md)
+          args=("$NAME" artifacts/windows/* artifacts/android/* --title "Instant Mic ${NAME#v}" --notes-file notes.md)
+
+          if [ "$CREATE_TAG" = "true" ]; then
+            # Auto release: the tag does not exist yet, so create it at the
+            # commit that was just built. A tag created with GITHUB_TOKEN does
+            # not trigger other workflows, so this cannot loop.
+            args+=(--target "$GITHUB_SHA")
+          elif git rev-parse -q --verify "refs/tags/$NAME" >/dev/null; then
+            # Pushed by a human: fail loudly if the tag is not what we built.
+            args+=(--verify-tag)
+          else
+            # Manual dispatch with an ad-hoc label (e.g. v0.1.0-draft): there
+            # is no tag to verify, and the release is a draft anyway.
+            args+=(--target "$GITHUB_SHA")
+          fi
+
           if [ "$DRAFT" = "true" ]; then
             args+=(--draft)
+          else
+            # --latest keeps the "latest" badge on the newest release, which is
+            # what /releases/latest resolves to. Drafts cannot be latest.
+            args+=(--latest)
           fi
           gh release create "${args[@]}"

@@ -37,6 +37,10 @@ cd android && .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 - 1つの PR は1つの目的に絞ってください
 - 挙動が変わる場合は `README.md` と `docs/` の該当箇所も更新してください
 - CI（Go / Android）が通ることが条件です
+- **PR のタイトルは Conventional Commits にしてください。** `main` にマージされると、
+  タイトルから次のバージョンが決まって自動でリリースされます
+  （`feat:` → minor、`fix:` など → patch、`feat!:` → 破壊的変更）。
+  詳細は [docs/release.md](docs/release.md) を参照してください
 
 ## 行動規範
 
