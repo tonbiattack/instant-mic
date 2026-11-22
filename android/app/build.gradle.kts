@@ -96,6 +96,9 @@ android {
     }
 
     sourceSets["main"].assets.srcDir("$rootDir/../licenses")
+    // The help document is a plain asset, so a JVM test can read it from the
+    // test classpath and fail when an edit breaks its structure.
+    sourceSets["test"].resources.srcDir("src/main/assets")
 
     testOptions {
         unitTests.isReturnDefaultValues = true
