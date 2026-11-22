@@ -83,6 +83,10 @@ object TestTags {
     const val TARGET_WINDOW = "target_window"
     const val REQUEST_PAIR = "request_pair"
     const val PAIR_REQUEST_WAITING = "pair_request_waiting"
+    const val HELP_BUTTON = "help_button"
+    const val HELP_SCREEN = "help_screen"
+    const val HELP_LOADING = "help_loading"
+    const val HELP_ERROR = "help_error"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -93,6 +97,7 @@ fun MainScreen(
 ) {
     val state by viewModel.ui.collectAsStateWithLifecycle()
     var showCommands by rememberSaveable { mutableStateOf(false) }
+    var showHelp by rememberSaveable { mutableStateOf(false) }
 
     // The pairing screen has nothing stored to reconnect to, so start looking
     // for PCs as soon as it is shown; that is what makes one-tap pairing work.
@@ -105,9 +110,21 @@ fun MainScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("instant-mic") },
+                title = { Text(if (showHelp) "使い方" else "instant-mic") },
                 actions = {
-                    if (state.pairing != null) {
+                    // Help is reachable before pairing too: the first thing a new
+                    // user needs is the setup steps, and they have no PC yet.
+                    TextButton(
+                        onClick = {
+                            if (!showHelp && state.speech.isActive) viewModel.toggleListening()
+                            showHelp = !showHelp
+                            if (showHelp) showCommands = false
+                        },
+                        modifier = Modifier.testTag(TestTags.HELP_BUTTON),
+                    ) {
+                        Text(if (showHelp) "戻る" else "使い方")
+                    }
+                    if (!showHelp && state.pairing != null) {
                         TextButton(
                             onClick = {
                                 // Editing settings while the microphone is open would
@@ -124,73 +141,81 @@ fun MainScreen(
             )
         },
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 20.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            val pairing = state.pairing
-            if (pairing == null) {
-                PairingPanel(
-                    state = state,
-                    onPair = viewModel::pair,
-                    onDismissError = viewModel::clearPairingError,
-                    onQRScanned = viewModel::pairWithQR,
-                    onConfirmPending = viewModel::confirmPendingPairing,
-                    onDismissPending = viewModel::dismissPendingPairing,
-                    onRequestPairing = viewModel::requestPairing,
-                )
-            } else if (showCommands) {
-                CommandsPanel(
-                    state = state,
-                    onSave = viewModel::saveCustomCommand,
-                    onDelete = viewModel::deleteCustomCommand,
-                    onClearError = viewModel::clearCommandEditorError,
-                    onContinuousChange = viewModel::setContinuousListening,
-                    onHapticsChange = viewModel::setHapticsEnabled,
-                    onAutoStartChange = viewModel::setAutoStartListening,
-                    onEngineChange = viewModel::setRecognitionEngine,
-                    onSilenceChange = viewModel::setSilenceMode,
-                    onIncrementalChange = viewModel::setIncrementalMode,
-                    onTermDictionaryChange = viewModel::setTermDictionary,
-                    onHiraganaChange = viewModel::setHiraganaOutput,
-                    onSaveTerm = viewModel::saveUserTerm,
-                    onDeleteTerm = viewModel::deleteUserTerm,
-                    onConfirmChange = viewModel::setConfirmDestructive,
-                )
-            } else {
-                val repair = state.needsRepair
-                if (repair != null) {
-                    RepairCard(
-                        message = repair,
-                        onRepair = viewModel::unpair,
-                        onRetry = viewModel::retryConnection,
+        if (showHelp) {
+            HelpScreen(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 20.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                val pairing = state.pairing
+                if (pairing == null) {
+                    PairingPanel(
+                        state = state,
+                        onPair = viewModel::pair,
+                        onDismissError = viewModel::clearPairingError,
+                        onQRScanned = viewModel::pairWithQR,
+                        onConfirmPending = viewModel::confirmPendingPairing,
+                        onDismissPending = viewModel::dismissPendingPairing,
+                        onRequestPairing = viewModel::requestPairing,
                     )
+                } else if (showCommands) {
+                    CommandsPanel(
+                        state = state,
+                        onSave = viewModel::saveCustomCommand,
+                        onDelete = viewModel::deleteCustomCommand,
+                        onClearError = viewModel::clearCommandEditorError,
+                        onContinuousChange = viewModel::setContinuousListening,
+                        onHapticsChange = viewModel::setHapticsEnabled,
+                        onAutoStartChange = viewModel::setAutoStartListening,
+                        onEngineChange = viewModel::setRecognitionEngine,
+                        onSilenceChange = viewModel::setSilenceMode,
+                        onIncrementalChange = viewModel::setIncrementalMode,
+                        onTermDictionaryChange = viewModel::setTermDictionary,
+                        onHiraganaChange = viewModel::setHiraganaOutput,
+                        onSaveTerm = viewModel::saveUserTerm,
+                        onDeleteTerm = viewModel::deleteUserTerm,
+                        onConfirmChange = viewModel::setConfirmDestructive,
+                    )
+                } else {
+                    val repair = state.needsRepair
+                    if (repair != null) {
+                        RepairCard(
+                            message = repair,
+                            onRepair = viewModel::unpair,
+                            onRetry = viewModel::retryConnection,
+                        )
+                    }
+                    ConnectionCard(
+                        connection = state.connection,
+                        pairing = pairing,
+                        discovery = state.discovery,
+                        onReconnect = viewModel::retryConnection,
+                    )
+                    MicrophonePanel(
+                        state = state,
+                        onToggle = {
+                            if (!state.microphoneGranted) onRequestMicrophone() else viewModel.toggleListening()
+                        },
+                    )
+                    LiveTranscriptPanel(state, onChoose = viewModel::chooseAlternative, onDismiss = viewModel::dismissAlternatives)
+                    ActionStatus(
+                        state,
+                        onDismiss = viewModel::dismissAction,
+                        onConfirmCommand = viewModel::confirmPendingCommand,
+                        onCancelCommand = viewModel::cancelPendingCommand,
+                    )
+                    CapabilityNotice(state)
+                    Spacer(Modifier.height(24.dp))
                 }
-                ConnectionCard(
-                    connection = state.connection,
-                    pairing = pairing,
-                    discovery = state.discovery,
-                    onReconnect = viewModel::retryConnection,
-                )
-                MicrophonePanel(
-                    state = state,
-                    onToggle = {
-                        if (!state.microphoneGranted) onRequestMicrophone() else viewModel.toggleListening()
-                    },
-                )
-                LiveTranscriptPanel(state, onChoose = viewModel::chooseAlternative, onDismiss = viewModel::dismissAlternatives)
-                ActionStatus(
-                    state,
-                    onDismiss = viewModel::dismissAction,
-                    onConfirmCommand = viewModel::confirmPendingCommand,
-                    onCancelCommand = viewModel::cancelPendingCommand,
-                )
-                CapabilityNotice(state)
-                Spacer(Modifier.height(24.dp))
             }
         }
     }
